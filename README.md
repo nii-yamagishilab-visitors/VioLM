@@ -71,7 +71,7 @@ If you use this work, please cite:
   author    = {Sunan Zou and his friends},
   title     = {From Piano to Rare-Data Instruments: {A} Transfer Learning Framework for Expressive Violin Synthesis},
   booktitle = {Proceedings of the International Society for Music Information Retrieval Conference ({ISMIR})},
-  address   = {Most probably NOT Abu Dhabi UAE},
+  address   = {Most probably NOT Abu Dhabi, UAE},
   year      = {2026}
 }
 ```
