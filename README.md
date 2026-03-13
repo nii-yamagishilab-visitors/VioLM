@@ -23,7 +23,7 @@ Key contributions:
 
 ### 1. Synthetic Data Preparation
 
-MIDI files from [GigaMIDI](https://github.com/Metacreation-Lab/GigaMIDI) are filtered and preprocessed for violin playability (pitch range, polyphony constraints), automatically annotated with articulations and velocities, and synthesized using multiple VSTs in a DAW. Loudness calibration is applied per articulation across VSTs.
+MIDI files from [GigaMIDI](https://github.com/Metacreation-Lab/GigaMIDI-Dataset) are filtered and preprocessed for violin playability (pitch range, polyphony constraints), automatically annotated with articulations and velocities, and synthesized using multiple VSTs in a DAW. Loudness calibration is applied per articulation across VSTs.
 
 ### 2. Tokenization
 
