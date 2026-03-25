@@ -1,0 +1,15 @@
+encodec
+phonemizer
+matplotlib
+
+[all]
+jupyterlab
+matplotlib
+
+[dev]
+jupyterlab
+matplotlib
+
+[docs]
+
+[tests]

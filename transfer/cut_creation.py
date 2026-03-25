@@ -32,7 +32,10 @@ def prepare_cuts(
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
     
-    transcript_dir = corpus_dir / "midi_seg_articulation"
+    # Tokenized MIDI (.npy) is expected to be stored next to segmented MIDI (.midi).
+    # `transfer/data_prepare.py` writes segments to `midi_seg/`, and
+    # `transfer/midi_tokenize.py` saves token arrays next to those `.midi` files.
+    transcript_dir = corpus_dir / "midi_seg"
     assert transcript_dir.is_dir(), f"No such directory: {transcript_dir}"
     if tokenizer == "expression":
         transcript_files = transcript_dir.rglob("**/*.npy")

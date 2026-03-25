@@ -110,7 +110,7 @@ class VALLF(nn.Module):
         ################## Expression Tokeniser ##########################
         # Last stream is articulation; use >=10 so GigaMIDI_arti (max id 9) is in range
         if articulation:
-            self.vocab_sizes = [92, 68, 1156, 772, 388, 20, 12]
+            self.vocab_sizes = [92, 68, 1156, 772, 388, 20, 16]
             emb_sizes = [32, 32, 256, 128, 64, 32, 16]
         else:
             self.vocab_sizes = [92, 68, 1156, 772, 388, 20]

@@ -1,30 +1,74 @@
-import os
-from expression_tokenizer import ExpressionTok
-from pathlib import Path
-from tqdm import tqdm
-import numpy as np
 import argparse
+import json
+import os
+from pathlib import Path
+from typing import Any, Dict
+
+import numpy as np
+from tqdm import tqdm
+
+from miditok import TokenizerConfig
+
 
 BOS_ID = 1
 EOS_ID = 2
 
-TICKS_PER_BEAT = 96
 
-TOKENIZER_PARAMS = {
-        "pitch_range": (21, 109),
-        "beat_res": {(0, 12):TICKS_PER_BEAT},
-        "num_velocities": 64,
-        "special_tokens": ["PAD", "BOS", "EOS", "MASK"],
-        "use_chords": False,
-        "use_rests": False,
-        "use_tempos": False,
-        "use_time_signatures": False,
-        "use_programs": False,
-        "tempo_range": (40, 250),  # (min, max)
-    }
+def _load_expression_tok(repo_root: Path):
+    """
+    Load ExpressionTok from `tokenization/VioLM-tokenizer.py`.
 
-def process_with_expression_tokenizer(data_folder, target_folder):
-    tokenizer = ExpressionTok(params=Path("midi-valle-tokenizer.json"))
+    The file name contains a hyphen, so we load it by path instead of normal import.
+    """
+    import importlib.util
+
+    tok_path = repo_root / "tokenization" / "VioLM-tokenizer.py"
+    spec = importlib.util.spec_from_file_location("violm_tokenizer", tok_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Failed to load tokenizer module from {tok_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # type: ignore[attr-defined]
+    return module.ExpressionTok
+
+
+def _load_tokenizer_config(repo_root: Path) -> TokenizerConfig:
+    cfg_path = repo_root / "tokenization" / "VioLM-tokenizer.json"
+    data: Dict[str, Any] = json.loads(cfg_path.read_text(encoding="utf-8"))
+    # The JSON is saved as {"config": {...}, ...}
+    cfg = data["config"]
+    # The saved JSON may contain non-int keys (e.g. time_signature_range)
+    # that need normalization before feeding into TokenizerConfig.
+    def _range_key_to_tuple(k: str):
+        a, b = k.split("_")
+        return (int(a), int(b))
+
+    if isinstance(cfg.get("beat_res"), dict):
+        cfg["beat_res"] = {
+            _range_key_to_tuple(k): v for k, v in cfg["beat_res"].items()
+        }
+    if isinstance(cfg.get("beat_res_rest"), dict):
+        cfg["beat_res_rest"] = {
+            _range_key_to_tuple(k): v for k, v in cfg["beat_res_rest"].items()
+        }
+    if isinstance(cfg.get("time_signature_range"), dict):
+        cfg["time_signature_range"] = {
+            int(k): v for k, v in cfg["time_signature_range"].items()
+        }
+    config = TokenizerConfig(**cfg)
+    # Ensure required fields exist for ExpressionTok
+    # (miditok may drop/override missing additional_params)
+    ap = dict(getattr(config, "additional_params", {}) or {})
+    ap.setdefault("data_type", "Midi")
+    config.additional_params = ap
+    return config
+
+def process_with_expression_tokenizer(data_folder: str, target_folder: str):
+    # Assume this script lives in `VioLM/transfer/`
+    repo_root = Path(__file__).resolve().parents[1]
+
+    ExpressionTok = _load_expression_tok(repo_root)
+    tokenizer = ExpressionTok(_load_tokenizer_config(repo_root))
+
     corpus_dir = Path(data_folder)
     assert corpus_dir.is_dir(), f"No such directory: {corpus_dir}"
     transcript_dir = corpus_dir / target_folder
@@ -37,7 +81,7 @@ def process_with_expression_tokenizer(data_folder, target_folder):
         
         try:
             sequence = tokenizer(file)[0].ids
-        except:
+        except Exception:
             os.remove(file)
             os.remove(str(file).replace("midi_seg", "wav_seg").replace("midi", "wav"))
             print(f"Error dealing with: {file.stem}")
@@ -57,7 +101,7 @@ def process_with_expression_tokenizer(data_folder, target_folder):
         #print(sequence[0])
         category_length = len(sequence[0])
         
-        # Add BOS and EOS tokens    
+        # Add BOS and EOS tokens
         bos_row = [[BOS_ID] * category_length]
         eos_row = [[EOS_ID] * category_length]
         sequence = bos_row + sequence + eos_row
