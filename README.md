@@ -168,14 +168,14 @@ python3 model/trainer.py \
   --decoder-dim 1024 --nhead 16 --num-decoder-layers 12 --prefix-mode 1 \
   --base-lr 0.05 --warmup-steps 20 --average-period 0 \
   --num-epochs 50 --start-epoch 1 --start-batch 0 --accumulate-grad-steps 8 \
-  --exp-dir exp/violin-model-arti-MUSC-lora_r8 \
   --max-duration 200 --keep-last-k 3 \
   --train-stage 0 --num-quantizers 4 \
-  --manifest-dir "local/MUSC/tokenized_articulation" \
   --filter-min-duration 3 \
   --inf-check True \
-  --world-size 1 \
-  --articulation True \
+  --world-size 1 \                                      # Number of GPUs (data parallelism)
+  --articulation True \                                 # Use articulation-augmented dataset
+  --manifest-dir "local/MUSC/tokenized_articulation" \  # Tokenized dataset manifests
+  --exp-dir exp/violin-model-arti-MUSC-lora_r8          # Experiment output directory
 ```
 
 LoRA and full-size finetuning are also supported if you add the following parameters:
