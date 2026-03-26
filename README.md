@@ -154,19 +154,76 @@ bash transfer/audio_tokenization.sh
 ```
 
 ---
+## Training
+
+Once you have dataset prepared, you can train with:
+
+```bash
+conda activate violm
+
+python3 model/trainer.py \
+  --num-buckets 12 \
+  --save-every-n 5000 --valid-interval 2000 \
+  --model-name valle --share-embedding true --norm-first true --add-prenet false \
+  --decoder-dim 1024 --nhead 16 --num-decoder-layers 12 --prefix-mode 1 \
+  --base-lr 0.05 --warmup-steps 20 --average-period 0 \
+  --num-epochs 50 --start-epoch 1 --start-batch 0 --accumulate-grad-steps 8 \
+  --exp-dir exp/violin-model-arti-MUSC-lora_r8 \
+  --max-duration 200 --keep-last-k 3 \
+  --train-stage 0 --num-quantizers 4 \
+  --manifest-dir "local/MUSC/tokenized_articulation" \
+  --filter-min-duration 3 \
+  --inf-check True \
+  --world-size 1 \
+  --articulation True \
+```
+
+LoRA and full-size finetuning are also supported if you add the following parameters:
+```bash
+--use-lora true --lora-rank 8 --lora-alpha 16 --lora-target-modules all \
+```
+```bash
+  --pretrained-checkpoint "path/to/pretrained/model"
+```
+
+Notes:
+- `--num-buckets` must match the configuration used to train your `--pretrained-checkpoint` (otherwise you may get embedding size mismatches).
+
+---
+## Inference
+
+`model/infer.py` expects tokenized MIDI tokens (`.npy`), not raw `.midi`.
+Those `.npy` token files are produced by `transfer/midi_tokenize.py`.
+
+Example:
+
+```bash
+conda activate violm
+
+python3 model/infer.py \
+  --checkpoint "checkpoint/best-valid-loss.pt" \
+  --midi-prompts "<PROMPT>.npy" \
+  --audio-prompts "<PROMPT>.wav" \
+  --midi "<TARGET>.npy" \
+  --output-dir "path/to/output/directory" \
+  --output-file <TARGET>.wav \
+  --use-lora true --lora-rank 8 --lora-alpha 16 --lora-target-modules all (must match with your training settings)
+```
+
+---
 
 ## Citation
 
 If you use this work, please cite:
 
 ```bibtex
-@inproceedings{ZouEtAl26_VioLM_ISMIR,
+<!-- @inproceedings{ZouEtAl26_VioLM_ISMIR,
   author    = {Sunan Zou and his friends},
   title     = {From Piano to Rare-Data Instruments: {A} Transfer Learning Framework for Expressive Violin Synthesis},
   booktitle = {Proceedings of the International Society for Music Information Retrieval Conference ({ISMIR})},
   address   = {Most probably NOT Abu Dhabi, UAE},
   year      = {2026}
-}
+} -->
 ```
 
 ---
