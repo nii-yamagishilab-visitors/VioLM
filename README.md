@@ -59,6 +59,10 @@ git clone https://github.com/nii-yamagishilab-visitors/VioLM.git
 cd VioLM
 conda create -n violm python=3.10.18
 conda activate violm
+
+# Download pkg-config and ffmpeg with conda (no sudo needed)
+conda install -c conda-forge pkg-config ffmpeg
+
 # AudioCraft
 git clone https://github.com/facebookresearch/audiocraft.git; cd audiocraft; pip install -e .; cd ..
 # PyTorch
