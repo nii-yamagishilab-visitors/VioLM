@@ -224,10 +224,10 @@ If you use this work, please cite:
 
 ```bibtex
 <!-- @inproceedings{ZouEtAl26_VioLM_ISMIR,
-  author    = {Sunan Zou and his friends},
-  title     = {From Piano to Rare-Data Instruments: {A} Transfer Learning Framework for Expressive Violin Synthesis},
-  booktitle = {Proceedings of the International Society for Music Information Retrieval Conference ({ISMIR})},
-  address   = {Most probably NOT Abu Dhabi, UAE},
+  author    = {Sunan Zou and Zhe Zhang and Yigitcan Özer and Guojie Lou and Junichi Yamagishi},
+  title     = {VioLM: A Neural Language Model for Violin Synthesis with Articulation},
+  booktitle = {Proceedings of the 27th International Society for Music Information Retrieval Conference ({ISMIR})},
+  address   = {Abu Dhabi, UAE},
   year      = {2026}
 } -->
 ```
