@@ -224,7 +224,7 @@ If you use this work, please cite:
 
 ```bibtex
 <!-- @inproceedings{ZouEtAl26_VioLM_ISMIR,
-  author    = {Sunan Zou and Zhe Zhang and Yigitcan Özer and Guojie Lou and Junichi Yamagishi},
+  author    = {Sunan Zou and Zhe Zhang and Yigitcan Özer and Guojie Luo and Junichi Yamagishi},
   title     = {VioLM: A Neural Language Model for Violin Synthesis with Articulation},
   booktitle = {Proceedings of the 27th International Society for Music Information Retrieval Conference ({ISMIR})},
   address   = {Abu Dhabi, UAE},
