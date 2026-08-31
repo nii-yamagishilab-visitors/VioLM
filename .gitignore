@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+build/
+dist/
+
+# Local environments and editor state
+.conda/
+.venv/
+.idea/
+.vscode/
+
+# Local experiment outputs
+/exp/
+/outputs/
+/work/
+
+# Generated data products
+audio_segments/
+midi_segments/
+midi_tokens/
+manifests/
+audio_tokens/
+metadata/

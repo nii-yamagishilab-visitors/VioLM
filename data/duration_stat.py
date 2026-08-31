@@ -2,6 +2,8 @@ import os
 import wave
 from pathlib import Path
 
+from valle.utils.cli import ConsistentArgumentParser
+
 def get_wav_duration(filepath):
     """Get duration of a WAV file in seconds."""
     try:
@@ -51,12 +53,6 @@ def calculate_total_duration(directory):
     print(f"{'='*50}")
 
 if __name__ == "__main__":
-    # Specify the directory containing WAV files
-    directory = "./"  # Current directory, change as needed
-    
-    # You can also take directory as command line argument
-    import sys
-    if len(sys.argv) > 1:
-        directory = sys.argv[1]
-    
-    calculate_total_duration(directory)
+    parser = ConsistentArgumentParser(description="Summarize WAV duration.")
+    parser.add_argument("--directory", type=Path, required=True)
+    calculate_total_duration(parser.parse_args().directory)

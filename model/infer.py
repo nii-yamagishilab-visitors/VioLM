@@ -1,248 +1,157 @@
 #!/usr/bin/env python3
-# Copyright    2023                            (authors: Feiteng Li)
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""
-Phonemize midi and EnCodec Audio.
+"""Synthesize violin audio from tokenized prompt and target MIDI."""
 
-Usage example:
-    python3 bin/infer.py \
-        --decoder-dim 128 --nhead 4 --num-decoder-layers 4 --model-name valle \
-        --midi-prompts "Go to her." \
-        --audio-prompts ./prompts/61_70970_000007_000001.wav \
-        --output-dir infer/demo_valle_epoch20 \
-        --checkpoint exp/valle_nano_v2/epoch-20.pt
+from __future__ import annotations
 
-"""
 import argparse
 import logging
-import os
-from pathlib import Path
-from tqdm import tqdm
-import numpy as np
-import glob
 import random
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Iterable, Optional
 
-os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
-
+import numpy as np
 import torch
 import torchaudio
-from icefall.utils import AttributeDict, str2bool
 
-from valle.data import (
-    AudioTokenizer,
-    AudioTokenizer32,
-    AudioTokenizer32FT,
-    tokenize_audio,
-)
-from valle.data.collation import get_midi_token_collater, get_midi_token_collater
-from valle.models import add_model_arguments, get_model
+from valle.data import AudioTokenizer32, AudioTokenizer32FT, tokenize_audio
+from valle.data.collation import get_midi_token_collater
+from valle.models import get_model
 from valle.models.lora_valle import (
-    apply_lora_to_valle,
     _parse_targets,
+    apply_lora_to_valle,
     use_attn_qkv_linear,
     use_attn_separate_qkv_linear,
 )
+from valle.utils.cli import ConsistentArgumentParser
+from valle.utils.runtime import AttributeDict, select_device, str2bool
 
 
-def get_args():
-    parser = argparse.ArgumentParser()
+logger = logging.getLogger("violm.infer")
 
-    parser.add_argument(
-        "--midi-prompts",
-        type=str,
-        default="",
-        help="midi prompts which are separated by |.",
-    )
 
-    parser.add_argument(
-        "--audio-prompts",
-        type=str,
-        default="",
-        help="Audio prompts which are separated by | and should be aligned with --midi-prompts.",
-    )
+def _expand_paths(values: Iterable[str]) -> list[Path]:
+    paths: list[Path] = []
+    for value in values:
+        paths.extend(Path(part) for part in value.split("|") if part)
+    return paths
 
-    parser.add_argument(
-        "--midi",
-        type=str,
-        default="To get up and running quickly just follow the steps below.",
-        help="midi to be synthesized.",
-    )
 
-    parser.add_argument(
-        "--midi-extractor",
-        type=str,
-        default="espeak",
-        help="espeak or pypinyin or pypinyin_initials_finals",
-    )
+def _load_tokens(path: Path) -> np.ndarray:
+    if not path.is_file():
+        raise FileNotFoundError(f"MIDI token file does not exist: {path}")
+    tokens = np.load(path, allow_pickle=False)
+    if tokens.ndim != 2 or tokens.shape[1] not in {6, 7}:
+        raise ValueError(
+            f"Expected a [notes, 6|7] token array in {path}, got {tokens.shape}"
+        )
+    return tokens.astype(np.int64, copy=False)
 
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default="exp/vallf_nano_full/checkpoint-100000.pt",
-        help="Path to the saved checkpoint.",
-    )
 
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("infer/demo"),
-        help="Path to the tokenized files.",
-    )
+def _concat_token_files(paths: list[Path]) -> np.ndarray:
+    arrays = [_load_tokens(path) for path in paths]
+    if not arrays:
+        raise ValueError("At least one MIDI token file is required")
+    feature_count = arrays[0].shape[1]
+    if any(array.shape[1] != feature_count for array in arrays):
+        raise ValueError("All MIDI token files must use the same number of streams")
+    combined = arrays[0]
+    for array in arrays[1:]:
+        combined = np.concatenate([combined[:-1], array[1:]], axis=0)
+    return combined
 
-    parser.add_argument(
-        "--top-k",
-        type=int,
-        default=-100,
-        help="Whether AR Decoder do top_k(if > 0) sampling.",
-    )
 
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=1.0,
-        help="The temperature of AR Decoder top_k sampling.",
-    )
+def _lora_targets_from_state(state: dict[str, torch.Tensor]) -> str:
+    targets = set()
+    keys = state.keys()
+    if any(".linear1.lora_" in key or ".linear2.lora_" in key for key in keys):
+        targets.add("ffn")
+    if any(".out_proj.lora_" in key for key in keys):
+        targets.add("attn_out")
+    for name in ("q", "k", "v"):
+        if any(f".{name}_proj.lora_" in key for key in keys):
+            targets.add(f"attn_{name}")
+    if any(".in_proj_linear.lora_" in key for key in keys):
+        targets.add("attn_qkv")
+    return "+".join(sorted(targets))
 
-    parser.add_argument(
-        "--continual",
-        type=str2bool,
-        default=False,
-        help="Do continual task.",
-    )
-    
-    parser.add_argument(
-        "--demo",
-        type=str2bool,
-        default=False,
-        help="Do demo task.",
-    )
-    
-    parser.add_argument(
-        "--audio-tokenizer",
-        type=str,
-        default="Encodec",
-        help="Which audio tokenizer to use, allow (Encodec, Encodec32, Encodec32FT)",
-    )
-    
-    parser.add_argument(
-        "--output-file",
-        type=str,
-        default="valle",
-        help="Output file name",
-    )
 
-    # LoRA-related arguments (should match training settings for LoRA checkpoints)
-    parser.add_argument(
-        "--use-lora",
-        type=str2bool,
-        default=False,
-        help="Expect a LoRA-augmented VALLE checkpoint and construct the model with LoRA adapters.",
-    )
-    parser.add_argument(
-        "--lora-rank",
-        type=int,
-        default=8,
-        help="LoRA rank used during training.",
-    )
-    parser.add_argument(
-        "--lora-alpha",
-        type=int,
-        default=16,
-        help="LoRA alpha used during training.",
-    )
-    parser.add_argument(
-        "--lora-dropout",
-        type=float,
-        default=0.0,
-        help="LoRA dropout used during training.",
-    )
-    parser.add_argument(
-        "--lora-target-modules",
-        type=str,
-        default="ffn+attn_out",
-        help=(
-            "LoRA targets used during training. Individual targets: 'ffn', 'attn_out', "
-            "'attn_q', 'attn_k', 'attn_v'. Shorthands: 'attn' -> attn_out+attn_q+attn_k+attn_v, "
-            "'all' -> ffn+attn_out+attn_q+attn_k+attn_v, 'attn_qkv' -> legacy fused Q/K/V. "
-            "Combine with '+', e.g. 'ffn+attn' or 'ffn+attn_out+attn_q'."
-        ),
-    )
-
-    add_model_arguments(parser)
-
-    return parser.parse_args()
+def _first_state_tensor(state, suffix: str):
+    return next((value for key, value in state.items() if key.endswith(suffix)), None)
 
 
 def load_model(
-    checkpoint,
-    device,
-    tokenizer_type: str = "articulation",
-    use_lora: bool = False,
-    lora_rank: int = 8,
-    lora_alpha: int = 16,
-    lora_dropout: float = 0.0,
-    lora_target_modules: str = "ffn+attn_out",
+    checkpoint_path: Path,
+    device: torch.device,
+    use_lora: Optional[bool] = None,
+    lora_rank: Optional[int] = None,
+    lora_alpha: Optional[int] = None,
+    lora_dropout: Optional[float] = None,
+    lora_target_modules: Optional[str] = None,
 ):
-    if not checkpoint:
-        return None
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Model checkpoint does not exist: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    state = checkpoint.get("model", checkpoint)
 
-    checkpoint = torch.load(checkpoint, map_location=device)
+    text_projection = _first_state_tensor(state, "ar_text_embedding.weight")
+    if text_projection is None:
+        raise KeyError("Checkpoint has no ar_text_embedding.weight")
+    articulation = text_projection.shape[1] == 560
 
-    # Auto-detect articulation from embedding input dimension (560 = 7 streams, 544 = 6 streams)
-    ckpt_emb_in = checkpoint["model"]["ar_text_embedding.weight"].shape[1]
-    articulation = (ckpt_emb_in == 560)
-
-    args = AttributeDict(checkpoint)
-    args["model_name"] = "valle"
-    args["decoder_dim"] = 1024
-    args["nhead"] = 16
-    args["num_decoder_layers"] = 12
-    args["norm_first"] = True
-    args["add_prenet"] = False
-    args["prefix_mode"] = 1
-    args["share_embedding"] = True
-    args["scale_factor"] = 1.0
-    args["prepend_bos"] = False
-    args["num_quantizers"] = 4
-    args["tokenizer_type"] = tokenizer_type
-    args["articulation"] = articulation
-
-    from contextlib import nullcontext
-    if use_lora:
-        _targets = _parse_targets(lora_target_modules)
-        _use_separate_qkv = bool(_targets & {"attn_q", "attn_k", "attn_v"})
-        _use_fused_qkv = "attn_qkv" in _targets
-    else:
-        _use_separate_qkv = _use_fused_qkv = False
-
-    if _use_separate_qkv:
-        build_ctx = use_attn_separate_qkv_linear()
-    elif _use_fused_qkv:
-        build_ctx = use_attn_qkv_linear()
-    else:
-        build_ctx = nullcontext()
-    with build_ctx:
-        model = get_model(args)
-
-    # If the checkpoint was trained with LoRA, we must construct the same
-    # LoRA-augmented architecture before loading the state dict.
-    if use_lora:
-        logging.info(
-            f"Constructing LoRA-augmented VALLE for inference "
-            f"(rank={lora_rank}, alpha={lora_alpha}, dropout={lora_dropout}, "
-            f"targets='{lora_target_modules}')"
+    detected_lora = any("lora_" in key for key in state)
+    use_lora = bool(checkpoint.get("use_lora", detected_lora)) if use_lora is None else use_lora
+    if use_lora != detected_lora:
+        raise ValueError(
+            f"Checkpoint LoRA detection is {detected_lora}, but --use-lora resolved to {use_lora}"
         )
+    if use_lora:
+        if lora_rank is None:
+            lora_rank = checkpoint.get("lora_rank")
+        if lora_rank is None:
+            lora_a = _first_state_tensor(state, "lora_A")
+            lora_rank = int(lora_a.shape[0]) if lora_a is not None else 8
+        lora_alpha = int(lora_alpha if lora_alpha is not None else checkpoint.get("lora_alpha", 16))
+        lora_dropout = float(lora_dropout if lora_dropout is not None else checkpoint.get("lora_dropout", 0.0))
+        lora_target_modules = lora_target_modules or checkpoint.get("lora_target_modules") or _lora_targets_from_state(state)
+        if not lora_target_modules:
+            raise ValueError("Could not infer LoRA target modules from the checkpoint")
+
+    params = AttributeDict(
+        model_name=checkpoint.get("model_name", "valle"),
+        decoder_dim=int(checkpoint.get("decoder_dim", text_projection.shape[0])),
+        nhead=int(checkpoint.get("nhead", 16)),
+        num_decoder_layers=int(checkpoint.get("num_decoder_layers", 12)),
+        norm_first=bool(checkpoint.get("norm_first", True)),
+        add_prenet=bool(checkpoint.get("add_prenet", False)),
+        prefix_mode=int(checkpoint.get("prefix_mode", 1)),
+        share_embedding=bool(checkpoint.get("share_embedding", True)),
+        scale_factor=float(checkpoint.get("scale_factor", 1.0)),
+        prepend_bos=bool(checkpoint.get("prepend_bos", False)),
+        num_quantizers=int(checkpoint.get("num_quantizers", 4)),
+        articulation=articulation,
+        scaling_xformers=bool(checkpoint.get("scaling_xformers", False)),
+    )
+
+    if use_lora:
+        targets = _parse_targets(lora_target_modules)
+        separate_qkv = bool(targets & {"attn_q", "attn_k", "attn_v"})
+        fused_qkv = "attn_qkv" in targets
+        if separate_qkv and fused_qkv:
+            raise ValueError("A LoRA checkpoint cannot mix fused and separate Q/K/V targets")
+        build_context = (
+            use_attn_separate_qkv_linear()
+            if separate_qkv
+            else use_attn_qkv_linear()
+            if fused_qkv
+            else nullcontext()
+        )
+    else:
+        build_context = nullcontext()
+
+    with build_context:
+        model = get_model(params)
+    if use_lora:
         apply_lora_to_valle(
             model,
             r=lora_rank,
@@ -251,24 +160,86 @@ def load_model(
             target_modules=lora_target_modules,
             freeze_base=False,
         )
-
-    missing_keys, unexpected_keys = model.load_state_dict(
-        checkpoint["model"], strict=True
+    model.load_state_dict(state, strict=True)
+    model.to(device).eval()
+    logger.info(
+        "Loaded %s (articulation=%s, LoRA=%s, decoder_dim=%d, layers=%d)",
+        checkpoint_path,
+        articulation,
+        use_lora,
+        params.decoder_dim,
+        params.num_decoder_layers,
     )
-    assert not missing_keys
-    model.to(device)
-    model.eval()
-
     return model
 
+
+def _create_audio_tokenizer(name: str, checkpoint: Path | None, device):
+    normalized = name.lower().replace("_", "-")
+    if normalized in {"encodec32-ft", "encodec32ft"}:
+        return AudioTokenizer32FT(device=device, checkpoint=checkpoint)
+    if normalized in {"encodec32", "encodec-32"}:
+        return AudioTokenizer32(device=device)
+    raise ValueError("--audio-tokenizer must be encodec32-ft or encodec32")
+
+
+def _output_path(output_dir: Path, output_file: str, index: int, total: int) -> Path:
+    requested = Path(output_file)
+    suffix = requested.suffix or ".wav"
+    stem = requested.stem
+    name = f"{stem}{suffix}" if total == 1 else f"{stem}-{index:03d}{suffix}"
+    return output_dir / name
+
+
+def get_parser() -> ConsistentArgumentParser:
+    parser = ConsistentArgumentParser(
+        description="Synthesize violin audio from VioLM MIDI tokens",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--codec-checkpoint", type=Path)
+    parser.add_argument("--midi-prompts", nargs="+", required=True, help="Prompt .npy files; '|' input remains supported.")
+    parser.add_argument("--audio-prompts", nargs="+", required=True, help="Aligned prompt audio files.")
+    parser.add_argument("--midi-tokens", "--midi", dest="midi_tokens", nargs="+", required=True, help="Target .npy files.")
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--output-file", default="violm.wav")
+    parser.add_argument("--audio-tokenizer", default="encodec32-ft")
+    parser.add_argument("--top-k", type=int, default=-100)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--continual", type=str2bool, default=False)
+    parser.add_argument("--use-lora", type=str2bool, default=None, help="Normally auto-detected from checkpoint.")
+    parser.add_argument("--lora-rank", type=int)
+    parser.add_argument("--lora-alpha", type=int)
+    parser.add_argument("--lora-dropout", type=float)
+    parser.add_argument("--lora-target-modules")
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="For example cuda:1 or cpu; auto selects the GPU with most free memory.",
+    )
+    return parser
+
+
 @torch.no_grad()
-def main():
-    args = get_args()
-    device = torch.device("cpu")
+def run(args: argparse.Namespace) -> list[Path]:
+    device = select_device(args.device)
+    logger.info("Inference device: %s", device)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     if torch.cuda.is_available():
-        device = torch.device("cuda", 0)
+        torch.cuda.manual_seed_all(args.seed)
+
+    midi_prompt_paths = _expand_paths(args.midi_prompts)
+    audio_prompt_paths = _expand_paths(args.audio_prompts)
+    target_paths = _expand_paths(args.midi_tokens)
+    if len(midi_prompt_paths) != len(audio_prompt_paths):
+        raise ValueError("--midi-prompts and --audio-prompts must contain the same number of files")
+    prompt_tokens = _concat_token_files(midi_prompt_paths)
+
     model = load_model(
-        args.checkpoint,
+        args.checkpoint.resolve(),
         device,
         use_lora=args.use_lora,
         lora_rank=args.lora_rank,
@@ -276,89 +247,63 @@ def main():
         lora_dropout=args.lora_dropout,
         lora_target_modules=args.lora_target_modules,
     )
+    audio_tokenizer = _create_audio_tokenizer(
+        args.audio_tokenizer,
+        args.codec_checkpoint.resolve() if args.codec_checkpoint else None,
+        device,
+    )
+    prompt_frames = [
+        tokenize_audio(args.audio_tokenizer, str(path), audio_tokenizer)
+        for path in audio_prompt_paths
+    ]
+    audio_prompts = torch.cat(prompt_frames, dim=-1).transpose(2, 1).to(device)
     midi_collater = get_midi_token_collater()
+    _, enroll_x_lens = midi_collater([prompt_tokens[:-1].tolist()])
 
-    audio_tokenizer = AudioTokenizer32FT()
-        
-    if os.path.isfile(f"{args.output_dir}/{args.output_file}.wav"):
-        return
-
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-
-    midi_prompts = " ".join(args.midi_prompts.split("|"))
-    audio_prompts = []
-
-    if args.audio_prompts:
-        for n, audio_file in enumerate(args.audio_prompts.split("|")):
-            encoded_frames = tokenize_audio(args.audio_tokenizer, audio_file, audio_tokenizer)
-            audio_prompts.append(encoded_frames)
-
-        assert len(args.midi_prompts.split("|")) == len(audio_prompts)
-        audio_prompts = torch.concat(audio_prompts, dim=-1).transpose(2, 1)
-        audio_prompts = audio_prompts.to(device)
-    # print(midi_prompts)
-    midi_prompts = np.load(midi_prompts)
-
-    model.eval()
-
-    for n, midi in enumerate(args.midi.split("|")):
-        if midi != "":
-            midi = np.load(midi, allow_pickle=True)
-
-            midi_tokens, midi_tokens_lens = midi_collater(
-                [   
-                    #(NOTE:Jingjing) Ensure the extra BOS & EOS was removed
-                    # np.concatenate([midi_prompts[:-1], midi[1:]], axis=0).tolist() 
-                    midi.tolist()
-                ]
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    outputs = []
+    for index, target_path in enumerate(target_paths):
+        output_path = _output_path(args.output_dir, args.output_file, index, len(target_paths))
+        if output_path.exists() and not args.overwrite:
+            logger.info("Skipping existing output: %s", output_path)
+            outputs.append(output_path)
+            continue
+        target_tokens = _load_tokens(target_path)
+        if target_tokens.shape[1] != prompt_tokens.shape[1]:
+            raise ValueError(
+                f"Prompt has {prompt_tokens.shape[1]} streams but {target_path} has {target_tokens.shape[1]}"
+            )
+        conditioned_tokens = np.concatenate(
+            [prompt_tokens[:-1], target_tokens[1:]], axis=0
+        )
+        midi_tokens, midi_lengths = midi_collater([conditioned_tokens.tolist()])
+        if args.continual:
+            encoded_frames = model.continual(
+                midi_tokens.to(device), midi_lengths.to(device), audio_prompts
             )
         else:
-            midi_tokens, midi_tokens_lens = midi_collater(
-                [
-                    midi_prompts.tolist()
-                ]
+            encoded_frames = model.inference(
+                midi_tokens.to(device),
+                midi_lengths.to(device),
+                audio_prompts,
+                enroll_x_lens=enroll_x_lens.to(device),
+                top_k=args.top_k,
+                temperature=args.temperature,
             )
+        samples = audio_tokenizer.decode(encoded_frames.transpose(2, 1), None)
+        torchaudio.save(str(output_path), samples[0].cpu(), audio_tokenizer.sample_rate)
+        outputs.append(output_path)
+        logger.info("Wrote %s", output_path)
+    return outputs
 
-        with torch.no_grad():
-            # synthesis
-            if args.continual:
-                assert midi == ""
-                encoded_frames = model.continual(
-                    midi_tokens.to(device),
-                    midi_tokens_lens.to(device),
-                    audio_prompts,
-                )
-            else:
-                enroll_x_lens = None
-                if len(midi_prompts) != 0:
-                    _, enroll_x_lens = midi_collater(
-                        [
-                            midi_prompts[:-1].tolist()
-                        ]
-                    )
-                encoded_frames = model.inference(
-                    midi_tokens.to(device),
-                    midi_tokens_lens.to(device),
-                    audio_prompts,
-                    enroll_x_lens=enroll_x_lens,
-                    top_k=args.top_k,
-                    temperature=args.temperature,
-                )
 
-            if audio_prompts != []:
-                samples = audio_tokenizer.decode(
-                    encoded_frames.transpose(2, 1), None
-                )
-                # store
-                torchaudio.save(
-                    f"{args.output_dir}/{args.output_file}_{n}.wav", samples[0].cpu(), 32000
-                )
-            else:  # Transformer
-                pass
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s",
+    )
+    run(get_parser().parse_args())
+
 
 if __name__ == "__main__":
-    formatter = (
-        "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
-    )
-    logging.basicConfig(format=formatter, level=logging.INFO)
     main()

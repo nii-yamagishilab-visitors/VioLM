@@ -22,7 +22,6 @@ import torchaudio
 import pprint
 import torch.nn as nn
 import torch.nn.functional as F
-from icefall.utils import make_pad_mask
 from torchmetrics.classification import MulticlassAccuracy
 
 from valle.data.input_strategies import PromptedFeatures
@@ -34,6 +33,7 @@ from valle.modules.transformer import (
     TransformerEncoder,
     TransformerEncoderLayer,
 )
+from valle.utils.runtime import make_pad_mask
 
 from .macros import NUM_AUDIO_TOKENS, NUM_TEXT_TOKENS
 from .visualizer import visualize
@@ -41,6 +41,14 @@ from .bert import ExpressionBert, ExpressionBertLM, ExpressionCrossEntropyLoss
 
 # Global audio tokenizer for training monitoring (lazy initialization)
 _training_audio_tokenizer = None
+_training_audio_codec_checkpoint = None
+
+
+def configure_training_audio_tokenizer(checkpoint: Union[str, Path]) -> None:
+    """Configure the optional codec used for decoded training samples."""
+    global _training_audio_codec_checkpoint, _training_audio_tokenizer
+    _training_audio_codec_checkpoint = Path(checkpoint).expanduser().resolve()
+    _training_audio_tokenizer = None
 
 
 def get_training_audio_tokenizer():
@@ -51,7 +59,13 @@ def get_training_audio_tokenizer():
     if _training_audio_tokenizer is None:
         from valle.data import AudioTokenizer32FT
 
-        _training_audio_tokenizer = AudioTokenizer32FT()
+        if _training_audio_codec_checkpoint is None:
+            raise RuntimeError(
+                "Training audio monitoring requires an explicit codec checkpoint."
+            )
+        _training_audio_tokenizer = AudioTokenizer32FT(
+            checkpoint=_training_audio_codec_checkpoint
+        )
     return _training_audio_tokenizer
 
 
@@ -662,7 +676,7 @@ class VALLF(nn.Module):
         
         ########## 
         embs = []
-        for i in range(4):
+        for i in range(len(self.vocab_sizes)):
             embs.append(self.feat_emb[i](text[..., i]))
         embs = torch.cat([*embs], dim=-1)        
         #########
@@ -845,6 +859,7 @@ class VALLE(VALLF):
         train_stage: int = 0,
         global_step: int = 0,
         output_dir: Optional[str] = None,
+        audio_monitor_interval: int = 2000,
         **kwargs,
     ) -> Tuple[torch.Tensor, Union[torch.Tensor, None]]:
         """
@@ -1067,10 +1082,11 @@ class VALLE(VALLF):
         if train_stage == 0:
             total_loss = total_loss / 2.0
 
-        # Audio monitoring: decode and save audio every 2000 steps
+        # Optional audio monitoring; disabled by the trainer unless requested.
         if (
-            global_step > 0
-            and global_step % 2000 == 0
+            audio_monitor_interval > 0
+            and global_step > 0
+            and global_step % audio_monitor_interval == 0
             and output_dir is not None
         ):
             ar_preds = ar_predictions if train_stage in [0, 1] else None

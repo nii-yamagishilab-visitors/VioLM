@@ -2,11 +2,14 @@ import pretty_midi
 import numpy as np
 import os
 import argparse
+import tempfile
 from pathlib import Path
 
 import mido
 from mido import MidiFile, MidiTrack, Message
 from tqdm import tqdm
+
+from valle.utils.cli import ConsistentArgumentParser
 
 
 def has_long_polyphony(midi_file_path, min_notes=2, min_duration=0.1):
@@ -671,7 +674,7 @@ def add_cc_control(input_file, output_file,
         
         # Add all original events first
         all_events.extend(events)
-        # Add Empression CC Control for SWAM VIOLIN
+        # Add a default expression control before the note events.
         if note != 0:
             all_events.append({
                 'time': 1,
@@ -831,12 +834,12 @@ def add_cc_directory(target_directory, output_directory, cc_config={}):
     print(f"\nCompleted! Processed files saved to: {output_directory}")
 
 def main():
-    parser = argparse.ArgumentParser(
+    parser = ConsistentArgumentParser(
         description='Apply velocity distribution from source MIDI files to target MIDI files with smooth local transitions.'
     )
-    parser.add_argument('--reference_dir', type=str, help='Directory containing source MIDI files for analysis')
-    parser.add_argument('--target_dir', type=str, help='Directory containing target MIDI files to process')
-    parser.add_argument('--output_dir', type=str, help='Directory to save processed MIDI files')
+    parser.add_argument('--reference-dir', type=str, help='Directory containing source MIDI files for analysis')
+    parser.add_argument('--target-dir', type=str, help='Directory containing target MIDI files to process')
+    parser.add_argument('--output-dir', type=str, help='Directory to save processed MIDI files')
     parser.add_argument(
         '--max-change',
         type=int,
@@ -873,17 +876,18 @@ def main():
     print(f"\nStep 3: Applying to target directory: {args.target_dir}")
     print(f"Each note will be assigned a random velocity from the source distribution")
     print(f"Velocity changes between consecutive notes limited to ±{args.max_change}")
-    add_velocity_directory(args.target_dir, velocity_distribution, 'tmp_midi_directory_1', max_change=args.max_change, filtered_files=filtered_files)
-
-    # # Step 4: Add Articulation
-    add_articulation_directory(target_directory='tmp_midi_directory_1', output_directory=args.output_dir)
-
-    # Step 5: Add CC Control
-    # add_cc_directory(target_directory='tmp_midi_directory_1', output_directory=args.output_dir)
-
-    # Clear temporary directory
-    import shutil
-    shutil.rmtree('tmp_midi_directory_1')
+    with tempfile.TemporaryDirectory(prefix="violm-midi-") as temporary_dir:
+        add_velocity_directory(
+            args.target_dir,
+            velocity_distribution,
+            temporary_dir,
+            max_change=args.max_change,
+            filtered_files=filtered_files,
+        )
+        add_articulation_directory(
+            target_directory=temporary_dir,
+            output_directory=args.output_dir,
+        )
     
     print("\n" + "=" * 70)
     print("Processing complete!")

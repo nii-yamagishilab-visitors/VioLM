@@ -43,16 +43,6 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
-from icefall.checkpoint import load_checkpoint, remove_checkpoints
-from icefall.checkpoint import save_checkpoint as save_checkpoint_impl
-from icefall.checkpoint import (
-    save_checkpoint_with_global_batch_idx,
-    update_averaged_model,
-)
-from icefall.dist import cleanup_dist, setup_dist
-from icefall.env import get_env_info
-from icefall.hooks import register_inf_check_hooks
-from icefall.utils import AttributeDict, MetricsTracker, setup_logger, str2bool
 from lhotse import CutSet
 from lhotse.cut import Cut
 from lhotse.dataset.sampling.base import CutSampler
@@ -64,6 +54,25 @@ from torch.utils.tensorboard import SummaryWriter
 
 from valle.data import TtsDataModule
 from valle.models import add_model_arguments, get_model
+from valle.utils.checkpoint import (
+    load_checkpoint,
+    remove_checkpoints,
+    save_checkpoint as save_checkpoint_impl,
+    save_checkpoint_with_global_batch_idx,
+    update_averaged_model,
+)
+from valle.utils.cli import ConsistentArgumentParser
+from valle.utils.runtime import (
+    AttributeDict,
+    MetricsTracker,
+    cleanup_dist,
+    get_env_info,
+    register_inf_check_hooks,
+    select_device,
+    setup_dist,
+    setup_logger,
+    str2bool,
+)
 from valle.modules.optim import Eden, Eve, ScaledAdam
 from valle.modules.scheduler import get_scheduler
 from valle.models.lora_valle import (
@@ -92,7 +101,7 @@ def set_batch_count(model: Union[nn.Module, DDP], batch_count: float) -> None:
 
 
 def get_parser():
-    parser = argparse.ArgumentParser(
+    parser = ConsistentArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
 
@@ -108,6 +117,15 @@ def get_parser():
         type=int,
         default=12354,
         help="Master port to use for DDP training.",
+    )
+
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help=(
+            "Device for single-GPU training; auto selects the GPU with most "
+            "free memory. DDP maps processes by rank."
+        ),
     )
 
     parser.add_argument(
@@ -285,9 +303,37 @@ def get_parser():
 
     parser.add_argument(
         "--pretrained-checkpoint",
-        type=str,
-        default="",
+        type=Path,
+        default=None,
         help="Path to a pretrained checkpoint to initialize the model.",
+    )
+
+    parser.add_argument(
+        "--bert-checkpoint",
+        type=Path,
+        default=None,
+        help="BERT checkpoint used only by --model-name=bert-valle.",
+    )
+
+    parser.add_argument(
+        "--save-training-audio",
+        type=str2bool,
+        default=False,
+        help="Periodically decode training samples for monitoring.",
+    )
+
+    parser.add_argument(
+        "--codec-checkpoint",
+        type=Path,
+        default=None,
+        help="Hybrid codec required when --save-training-audio=true.",
+    )
+
+    parser.add_argument(
+        "--training-audio-interval",
+        type=int,
+        default=2000,
+        help="Global-step interval for decoded training samples.",
     )
 
     # LoRA-related arguments (opt-in, safe for existing workflows)
@@ -604,11 +650,13 @@ def compute_loss(
     extra_kwargs = {}
     if (
         is_training
+        and params.save_training_audio
         and params.model_name.lower()
         in ["vall-e", "valle", "vall-f", "vallf"]
     ):
         extra_kwargs["global_step"] = params.batch_idx_train
         extra_kwargs["output_dir"] = str(params.exp_dir)
+        extra_kwargs["audio_monitor_interval"] = params.training_audio_interval
 
     if params.model_name.lower() in ["bert-valle", "bertvalle"]:
         with torch.set_grad_enabled(is_training):
@@ -967,6 +1015,17 @@ def run(rank, world_size, args):
     if not hasattr(params, 'tokenizer_type'):
         params.tokenizer_type = 'articulation'
 
+    if params.save_training_audio:
+        if params.codec_checkpoint is None:
+            raise ValueError(
+                "--codec-checkpoint is required when --save-training-audio=true"
+            )
+        if not params.codec_checkpoint.is_file():
+            raise FileNotFoundError(params.codec_checkpoint)
+        from valle.models.valle import configure_training_audio_tokenizer
+
+        configure_training_audio_tokenizer(params.codec_checkpoint)
+
     fix_random_seed(params.seed)
     rng = random.Random(params.seed)
     if world_size > 1:
@@ -987,7 +1046,12 @@ def run(rank, world_size, args):
 
     device = torch.device("cpu")
     if torch.cuda.is_available():
-        device = torch.device("cuda", rank)
+        device = (
+            torch.device("cuda", rank)
+            if world_size > 1
+            else select_device(params.device)
+        )
+        torch.cuda.set_device(device)
         # https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -1022,22 +1086,10 @@ def run(rank, world_size, args):
 
     if params.pretrained_checkpoint:
         checkpoint = torch.load(params.pretrained_checkpoint, map_location=device)
-        args_model = AttributeDict(checkpoint)
-        args_model["model_name"] = "valle"
-        args_model["decoder_dim"] = 1024
-        args_model["nhead"] = 16
-        args_model["num_decoder_layers"] = 12
-        args_model["norm_first"] = True
-        args_model["add_prenet"] = False
-        args_model["prefix_mode"] = params.prefix_mode
-        args_model["share_embedding"] = True
-        args_model["scale_factor"] = 1.0
-        args_model["prepend_bos"] = False
-        args_model["num_quantizers"] = 4
-        args_model["tokenizer_type"] = getattr(
-            params, "tokenizer_type", "articulation"
-        )
-        args_model["articulation"] = params.articulation
+        # The requested architecture is defined entirely by CLI/config values.
+        # This avoids silently forcing the paper's 1024/16/12/4 setup when a
+        # user intentionally initializes a smaller or otherwise compatible run.
+        args_model = AttributeDict(params)
 
         with _build_ctx:
             model = get_model(args_model)
@@ -1099,9 +1151,14 @@ def run(rank, world_size, args):
         )
         print(model.valle)
         # Load the checkpoint file first
-        bertlm_ckpt_path = "/data/home/acw555/score-to-performance/logs/s2p_bert_class/runs/2024-05-22_02-26-21/checkpoints/model_state_dict.pth"
+        if params.bert_checkpoint is None:
+            raise ValueError(
+                "--bert-checkpoint is required for --model-name=bert-valle"
+            )
+        if not params.bert_checkpoint.is_file():
+            raise FileNotFoundError(params.bert_checkpoint)
         # Load state dict and remove "net." prefix from keys
-        bertlm_state_dict = torch.load(bertlm_ckpt_path)
+        bertlm_state_dict = torch.load(params.bert_checkpoint, map_location="cpu")
         bertlm_state_dict = {k.replace('net.', ''): v for k, v in bertlm_state_dict.items()}
 
         # Now load the state dict into the model
@@ -1127,7 +1184,11 @@ def run(rank, world_size, args):
     model.to(device)
     if world_size > 1:
         logging.info("Using DDP")
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(
+            model,
+            device_ids=[device.index],
+            find_unused_parameters=True,
+        )
 
 
     if params.model_name.lower() in ["bert-valle", "bertvalle"]:
@@ -1241,7 +1302,6 @@ def run(rank, world_size, args):
     dataset = TtsDataModule(args)
     train_cuts = dataset.train_cuts()
     valid_cuts = dataset.dev_cuts()
-    test_cuts = dataset.test_cuts()
 
     train_cuts = filter_short_and_long_utterances(
         train_cuts, params.filter_min_duration, params.filter_max_duration
@@ -1249,15 +1309,11 @@ def run(rank, world_size, args):
     valid_cuts = filter_short_and_long_utterances(
         valid_cuts, params.filter_min_duration, params.filter_max_duration
     )
-    test_cuts = filter_short_and_long_utterances(
-        test_cuts, params.filter_min_duration, params.filter_max_duration
-    )
-    
+
     train_dl = dataset.train_dataloaders(
         train_cuts, sampler_state_dict=sampler_state_dict
     )
     valid_dl = dataset.valid_dataloaders(valid_cuts)
-    # test_dl = dataset.test_dataloaders(test_cuts)
 
     if params.oom_check:
         scan_pessimistic_batches_for_oom(

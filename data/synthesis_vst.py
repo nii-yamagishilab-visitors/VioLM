@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Script to generate violin audio from MIDI files using Reaper's Python API.
+"""Generate violin audio from MIDI files using REAPER's Python API.
 
 This script:
 1. Loads MIDI files from a specified directory
@@ -19,9 +18,8 @@ Requirements:
     - VST/VST3i plugins installed
 
 Usage:
-    python reaper_midi_to_audio.py --input_dir /path/to/midi/files \\
-                                   --output_dir /path/to/output \\
-                                   --plugin "VST3: Violin Plugin Name"
+    python data/synthesis_vst.py --input-dir /path/to/midi/files \\
+        --output-dir /path/to/output --plugin "VST3: Violin Plugin Name"
 """
 
 import argparse
@@ -30,27 +28,18 @@ import time
 from pathlib import Path
 from typing import Optional, List
 import logging
-from tqdm import tqdm
-import subprocess
 import numpy as np
+from tqdm import tqdm
+
+from valle.utils.cli import ConsistentArgumentParser
 
 try:
     import reapy
 except ImportError:
-    print("ERROR: reapy library not found. Please install it with: pip install python-reapy")
-    exit(1)
+    reapy = None
 
-try:
-    import pretty_midi
-except ImportError:
-    print("ERROR: pretty_midi library not found. Please install it with: pip install pretty_midi")
-    exit(1)
-
-try:
-    import librosa
-except ImportError:
-    print("ERROR: librosa library not found. Please install it with: pip install librosa")
-    exit(1)
+import librosa
+import pretty_midi
 
 
 # Setup logging
@@ -106,7 +95,7 @@ class ReaperMIDIRenderer:
         Initialize the Reaper MIDI renderer.
         
         Args:
-            plugin_name: Name of the VST/VST3i plugin to use (e.g., "VST3: Kontakt 8")
+            plugin_name: Name of the VST/VST3i plugin to use
             sample_rate: Sample rate for audio rendering (default: 44100)
             fx_chain: Path to FX chain file (.RfxChain) with pre-configured plugin
             track_template: Path to track template file (.RTrackTemplate) with pre-configured plugin
@@ -121,6 +110,9 @@ class ReaperMIDIRenderer:
         
     def connect_to_reaper(self):
         """Connect to Reaper instance."""
+        if reapy is None:
+            logger.error("python-reapy is required: pip install python-reapy")
+            return False
         try:
             # Check if Reaper is running and enable ReaScript API
             # logger.info("Connecting to Reaper...")
@@ -351,7 +343,6 @@ class ReaperMIDIRenderer:
                 try:
                     fx = track.add_fx(plugin_name)
                     # logger.info(f"Plugin loaded successfully")
-                    # logger.warning("⚠️  Note: Kontakt and similar plugins may need instrument selection!")
                     # logger.warning("   Consider using --fx-chain with a pre-configured preset")
                 except Exception as e:
                     logger.error(f"Failed to load plugin '{plugin_name}': {e}")
@@ -524,37 +515,37 @@ class ReaperMIDIRenderer:
 
 def main():
     """Main entry point for the script."""
-    parser = argparse.ArgumentParser(
+    parser = ConsistentArgumentParser(
         description='Generate violin audio from MIDI files using Reaper with tempo and duration verification',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Process MIDI files with a specific violin plugin
-  python reaper_midi_to_audio.py -i ./midi_files -o ./audio_output \\
-      -p "VST3: Kontakt 7 (Native Instruments)"
+  python data/synthesis_vst.py -i ./midi_files -o ./audio_output \\
+      -p "VST3: Violin Instrument (Vendor)"
   
   # Process with custom duration tolerance (5%)
-  python reaper_midi_to_audio.py -i ./midi_files -o ./audio_output \\
-      -p "VST3: Kontakt 7" --duration-tolerance 0.05
+  python data/synthesis_vst.py -i ./midi_files -o ./audio_output \\
+      -p "VST3: Violin Instrument (Vendor)" --duration-tolerance 0.05
   
   # Process with default MIDI synth (no plugin)
-  python reaper_midi_to_audio.py -i ./midi_files -o ./audio_output
+  python data/synthesis_vst.py -i ./midi_files -o ./audio_output
   
   # List plugin format help
-  python reaper_midi_to_audio.py --list-plugins
+  python data/synthesis_vst.py --list-plugins
 
 Note: Reaper must be running before executing this script!
         """
     )
     
     parser.add_argument(
-        '-i', '--input_dir',
+        '-i', '--input-dir',
         type=str,
         help='Directory containing MIDI files to process'
     )
     
     parser.add_argument(
-        '-o', '--output_dir',
+        '-o', '--output-dir',
         type=str,
         help='Directory for output WAV files'
     )
@@ -563,7 +554,7 @@ Note: Reaper must be running before executing this script!
         '-p', '--plugin',
         type=str,
         default=None,
-        help='VST/VST3i plugin name (e.g., "VST3: Kontakt 7", "VSTi: Spitfire Audio")'
+        help='VST/VST3i plugin name as displayed in the REAPER FX browser'
     )
 
     parser.add_argument(
@@ -581,7 +572,7 @@ Note: Reaper must be running before executing this script!
     )
     
     parser.add_argument(
-        '-sr', '--sample_rate',
+        '-sr', '--sample-rate',
         type=int,
         default=44100,
         help='Sample rate for output audio (default: 44100)'
@@ -600,12 +591,6 @@ Note: Reaper must be running before executing this script!
         help='Show information about plugin naming format and exit'
     )
 
-    parser.add_argument(
-        '--setup-kontakt',
-        action='store_true',
-        help='Show guide for setting up Kontakt 8 with instruments'
-    )
-    
     args = parser.parse_args()
     
     # Handle --list-plugins
@@ -624,17 +609,15 @@ Note: Reaper must be running before executing this script!
         print("  VST: Plugin Name (Manufacturer)")
         print("  VSTi: Plugin Name")
         print("\nExample plugin names:")
-        print("  - 'VST3: Kontakt 7 (Native Instruments)'")
-        print("  - 'VST: Spitfire Audio Violin (Spitfire Audio)'")
-        print("  - 'VSTi: Halion Sonic SE'")
-        print("  - 'VST3: BBC Symphony Orchestra (Spitfire Audio)'")
+        print("  - 'VST3: Violin Instrument (Vendor)'")
+        print("  - 'VSTi: Instrument Name'")
         print("\nTip: Copy the exact name from Reaper's FX browser")
         print("="*60 + "\n")
         return
     
     # Validate required arguments
     if not args.input_dir or not args.output_dir:
-        parser.error("--input_dir and --output_dir are required (or use --list-plugins / --setup-kontakt)")
+        parser.error("--input-dir and --output-dir are required (or use --list-plugins)")
     
     # Validate FX options
     if args.fx_chain and args.track_template:
@@ -677,9 +660,6 @@ Note: Reaper must be running before executing this script!
         logger.info("✓ Using track template (instrument already loaded)")
     elif args.plugin:
         logger.info(f"Plugin: {args.plugin}")
-        if "kontakt" in args.plugin.lower():
-            logger.warning("⚠️  Kontakt detected - may need instrument selection!")
-            logger.warning("   Use --setup-kontakt to learn how to use FX chains")
     else:
         logger.warning("No plugin specified - will use default MIDI synth")
     

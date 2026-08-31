@@ -1,1 +1,3 @@
-__version__ = "1.0.0.dev+git.433ec02.dirty"
+"""VioLM package version (kept static so installation never modifies source)."""
+
+__version__ = "1.0.0"

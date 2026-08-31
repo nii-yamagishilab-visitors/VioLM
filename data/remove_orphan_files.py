@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+from valle.utils.cli import ConsistentArgumentParser
+
 def get_file_prefix(filename):
     """Extract prefix from filename (everything before the extension)."""
     return Path(filename).stem
@@ -124,16 +126,16 @@ def show_matched_pairs(directory):
 
 # Example usage
 if __name__ == "__main__":
-    # Configuration
-    import sys
-    target_directory = sys.argv[1]  # Change to your directory
-    
+    parser = ConsistentArgumentParser(
+        description="Find WAV/MID files without a stem-matched pair."
+    )
+    parser.add_argument("--directory", type=Path, required=True)
+    parser.add_argument("--delete", action="store_true", help="Delete orphaned files; default is dry-run.")
+    args = parser.parse_args()
     print("Analyzing directory for orphaned files...\n")
-    
-    # First, run in dry-run mode to see what would be deleted
     find_orphaned_files(
-        directory=target_directory,
-        dry_run=True if sys.argv[2] == 'True' else False # Set to False to actually delete files
+        directory=args.directory,
+        dry_run=not args.delete,
     )
     
     # Optionally, show all matched pairs

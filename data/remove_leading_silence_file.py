@@ -3,6 +3,8 @@ import wave
 import numpy as np
 from pathlib import Path
 
+from valle.utils.cli import ConsistentArgumentParser
+
 def has_leading_silence(wav_path, silence_threshold_seconds=2.0, silence_db=-40):
     """
     Check if a WAV file starts with silence >= threshold.
@@ -111,16 +113,17 @@ def remove_silent_wav_files(directory, silence_threshold=2.0, silence_db=-40, dr
 
 # Example usage
 if __name__ == "__main__":
-    # Configuration
-    import sys
-    target_directory = sys.argv[1]  # Change to your directory
-    silence_threshold_seconds = 2.0     # Minimum silence duration
-    silence_db_threshold = -40          # dB threshold for silence
-    
-    # First run in dry-run mode to see what would be deleted
+    parser = ConsistentArgumentParser(
+        description="Find WAV files with excessive leading silence."
+    )
+    parser.add_argument("--directory", type=Path, required=True)
+    parser.add_argument("--silence-threshold", type=float, default=2.0)
+    parser.add_argument("--silence-db", type=float, default=-40.0)
+    parser.add_argument("--delete", action="store_true", help="Delete matching files; default is dry-run.")
+    args = parser.parse_args()
     remove_silent_wav_files(
-        directory=target_directory,
-        silence_threshold=silence_threshold_seconds,
-        silence_db=silence_db_threshold,
-        dry_run=True if sys.argv[2]=='True' else False  # Set to False to actually delete files
+        directory=args.directory,
+        silence_threshold=args.silence_threshold,
+        silence_db=args.silence_db,
+        dry_run=not args.delete,
     )

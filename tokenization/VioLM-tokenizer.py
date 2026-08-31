@@ -3,7 +3,7 @@ from __future__ import annotations
 from symusic import Note, Score, Tempo, TimeSignature, Track
 from miditok.classes import Event, TokSequence
 from miditok.constants import MIDI_INSTRUMENTS, TIME_SIGNATURE, TEMPO
-from miditok.midi_tokenizer import MIDITokenizer
+from miditok.midi_tokenizer import MusicTokenizer as MIDITokenizer
 from miditok.utils import (
     compute_ticks_per_bar, 
     compute_ticks_per_beat, 
@@ -190,7 +190,7 @@ class ExpressionTok(MIDITokenizer):
 
         return all_events
 
-    def _midi_to_tokens(self, midi: Score) -> TokSequence | list[TokSequence]:
+    def _score_to_tokens(self, midi: Score, attribute_controls_indexes=None) -> TokSequence | list[TokSequence]:
         r"""
         Convert a **preprocessed** MIDI object to a sequence of tokens.
 
@@ -216,7 +216,7 @@ class ExpressionTok(MIDITokenizer):
                 self.add_to_vocab(f"Bar_{i}", 4)
             self.config.additional_params["max_bar_embedding"] = num_bars
 
-        return super()._midi_to_tokens(midi)
+        return super()._score_to_tokens(midi, attribute_controls_indexes)
     
     def _time_quantize_by_group(self, notes):
         '''
@@ -254,19 +254,26 @@ class ExpressionTok(MIDITokenizer):
                 onset = note.start
         return notes
     
-    def preprocess_midi(self, midi: Score) -> Score:
-        pre_processed_midi = super().preprocess_midi(midi)
+    def preprocess_score(self, midi: Score) -> Score:
+        pre_processed_midi = super().preprocess_score(midi)
         default_program = 40 # Violin program number
         for track in pre_processed_midi.tracks:
             if not track.is_drum and track.program is None:
                 track.program = default_program
-        if midi.tracks.__len__() > 1:
+        if len(pre_processed_midi.tracks) > 1:
             from miditok.utils import merge_tracks
-            merge_tracks(pre_processed_midi.tracks)
+            merged = merge_tracks(pre_processed_midi)
+            pre_processed_midi.tracks = [merged]
         return pre_processed_midi
     
     def _create_track_events(
-        self, track: Track, ticks_per_beat: np.ndarray = None
+        self,
+        track: Track,
+        ticks_per_beat: np.ndarray = None,
+        time_division: int = None,
+        ticks_bars: object = None,
+        ticks_beats: object = None,
+        attribute_controls_indexes: object = None,
     ) -> list[Event]:
         r"""
         Extract the tokens/events from a track (``symusic.Track``).
@@ -1020,7 +1027,7 @@ class ExpressionTok(MIDITokenizer):
         
         return Pmidi, Smidi
            
-    def _tokens_to_midi(
+    def _tokens_to_score(
         self,
         tokens: TokSequence | list[TokSequence],
         programs: list[tuple[int, bool]] | None = None,
@@ -1505,73 +1512,7 @@ class ExpressionTok(MIDITokenizer):
         return array[idxs]
 
 if __name__ == "__main__":
-    
-    datatype = sys.argv[1]
-    
-    """
-    Test the Expression tokenizer.
-
-    * 0: Pitch;
-    * 1: Performance Velocity; -> PVelocity
-    * 2: Performance Duration; -> PDuration
-    * 3: Performance Inter Onset Interval (Onset time difference between the current note and the previous note); -> PIOI
-    * 4: Perfromance Position; -> PPosition
-    * 5: Perfromance Bar; -> PBar
-    <----------- Alignment ------------>
-    * 6: Score Velocity; -> SVelocity
-    * 7: Score Duration; -> SDuration
-    * 8: Score Inter Onset Interval; -> SIOI
-    * 9: Score Position; -> SPosition
-    * 10: Score Bar; -> SBar
-    * 11: Duration Deviation; -> SPDurationDev (Optional)
-
-    **Notes:**
-    * Tokens are first sorted by time, then track, then pitch values.
-    """
-    
-    DATA_FOLDER = "/home/smg/v-jtbetsy/DATA/ATEPP-s2a" #Path to the dictionary of the midi data
-    align_file_path = "Ludwig_van_Beethoven/Piano_Sonata_No._7_in_D_Major,_Op._10_No._3/II._Largo_e_mesto/05926_infer_corresp.txt"
-    performance_midi_path = "Ludwig_van_Beethoven/Piano_Sonata_No._7_in_D_Major,_Op._10_No._3/III._Menuetto._Allegro/05813.mid"
-    score_midi_path = "Ludwig_van_Beethoven/Piano_Sonata_No._7_in_D_Major,_Op._10_No._3/III._Menuetto._Allegro/musicxml_cleaned.musicxml.midi"
-    
-    TOKENIZER_PARAMS = {
-        "pitch_range": (21, 109),
-        "beat_res": {(0, 12):TICKS_PER_BEAT},
-        "num_velocities": 64,
-        "special_tokens": ["PAD", "BOS", "EOS", "MASK"],
-        "use_chords": False,
-        "use_rests": False,
-        "use_tempos": False,
-        "use_time_signatures": False,
-        "use_programs": False,
-        "num_tempos": 32,  # number of tempo bins
-        "tempo_range": (40, 250),  # (min, max)
-        "data_type": "Midi",
-        "remove_outliers": True,
-        "durdev": False
-    }
-    
-    if datatype != "Midi":
-        TOKENIZER_PARAMS['data_type'] = datatype
-        
-    #initialize tokenizer   
-    config = TokenizerConfig(**TOKENIZER_PARAMS) 
-    tokenizer = ExpressionTok(config)
-    
-    #tokennize files (Performance & Alignment)
-    if datatype != "Midi":
-        """
-        Note that for the alignment files, there will be abnormal alignment results where I defined as outliers here. 
-        They are notes that should appear before or after the current section but wrongly align to the performance notes.add(element)
-        """
-        tokens = tokenizer.alignment_to_token(os.path.join(DATA_FOLDER, align_file_path))
-        print(f"Tokens for the first note: {tokens.ids[0]}")
-        tokenizer.align_tokens_to_midi(tokens, ppath="data/performance.mid", spath="data/score.mid")
-        for i in tokenizer.vocab:
-            print(list(i.keys())[4].split("_")[0], len(i))
-    else: # For alignments
-        tokens = tokenizer(Path("to", os.path.join(DATA_FOLDER, performance_midi_path))) #Note the return is a list of TokSequence
-        print(f"Tokens for the first note: {tokens[0].ids[0]}")
-        midi = tokenizer.tokens_to_midi(tokens)
-        # midi.dump_midi("output/output.mid")
-        # print(tokenizer.vocab[3])
+    raise SystemExit(
+        "This file defines ExpressionTok. Use transfer/midi_tokenize.py "
+        "to tokenize MIDI files with the versioned JSON configuration."
+    )

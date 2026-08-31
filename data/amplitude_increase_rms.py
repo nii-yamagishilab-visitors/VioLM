@@ -1,7 +1,15 @@
+#!/usr/bin/env python3
+"""Increase the RMS level of WAV files."""
+
 import os
-import numpy as np
+
 import librosa
+import numpy as np
 import soundfile as sf
+from pathlib import Path
+
+from valle.utils.cli import ConsistentArgumentParser
+
 
 def calculate_rms(audio):
     """Calculate the RMS (Root Mean Square) of an audio signal."""
@@ -90,10 +98,9 @@ def process_directory(input_dir, output_dir, rms_increase=0.2):
     print("Processing complete!")
 
 if __name__ == "__main__":
-    # Configuration
-    import sys
-    INPUT_DIR = sys.argv[1]#"./test_increase"  # Change this to your input directory
-    OUTPUT_DIR = sys.argv[2]#"./output_increase"  # Change this to your output directory
-    RMS_INCREASE = float(sys.argc[3])#0.2  # Amount to increase RMS by
-    
-    process_directory(INPUT_DIR, OUTPUT_DIR, RMS_INCREASE)
+    parser = ConsistentArgumentParser(description="Increase WAV RMS by a fixed amount.")
+    parser.add_argument("--input-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--rms-increase", type=float, required=True)
+    args = parser.parse_args()
+    process_directory(args.input_dir, args.output_dir, args.rms_increase)

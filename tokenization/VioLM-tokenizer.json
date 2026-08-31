@@ -286,7 +286,7 @@
             "remove_outliers": true,
             "durdev": false,
             "max_bar_embedding": 3000,
-            "use_articulation": false,
+            "use_articulation": true,
             "key_switch_map": {
                 "28": "legato",
                 "24": "staccato",

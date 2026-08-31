@@ -22,14 +22,14 @@ You can use the displayed value to choose minimum/maximum duration
 to remove short and long utterances during the training.
 """
 
-import argparse
 from pathlib import Path
 
 from lhotse import load_manifest_lazy
+from valle.utils.cli import ConsistentArgumentParser
 
 
 def get_args():
-    parser = argparse.ArgumentParser()
+    parser = ConsistentArgumentParser()
     parser.add_argument(
         "--manifest-dir",
         type=Path,

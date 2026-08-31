@@ -15,6 +15,7 @@
 
 import re
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Pattern, Union
 
 import numpy as np
@@ -218,7 +219,6 @@ class AudioTokenizer32:
         device: Any = None,
     ) -> None:
         # Instantiate a pretrained EnCodec model
-        # model = CompressionModel.get_pretrained('/data/scratch/acw555/ATEPP-valle/checkpoints/xps/c9ca89f6/compression_32khz_new.bin')
         model = CompressionModel.get_pretrained('facebook/encodec_32khz')
         
         if not device:
@@ -243,15 +243,22 @@ class AudioTokenizer32:
         return self.codec.decode(frames, scales)
     
 class AudioTokenizer32FT:
-    """EnCodec 32 hz audio."""
+    """Fine-tuned 32 kHz EnCodec loaded from an explicit checkpoint."""
 
     def __init__(
         self,
         device: Any = None,
+        checkpoint: Union[str, Path, None] = None,
     ) -> None:
-        # Instantiate a pretrained EnCodec model
-        model = CompressionModel.get_pretrained('/home/smg/v-sunan/VIOLIN-VALLE/egs/atepp/checkpoints/compression_32khz_violin_piano_hybrid.bin')
-        # model = CompressionModel.get_pretrained('facebook/encodec_32khz')
+        if checkpoint is None:
+            raise ValueError(
+                "The fine-tuned 32 kHz codec requires a checkpoint. Pass "
+                "--codec-checkpoint (or use the pretrained encodec32 tokenizer)."
+            )
+        checkpoint = Path(checkpoint).expanduser().resolve()
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"Codec checkpoint does not exist: {checkpoint}")
+        model = CompressionModel.get_pretrained(str(checkpoint))
         
         if not device:
             device = torch.device("cpu")
@@ -320,10 +327,10 @@ def tokenize_audio(tokenizer_type: str, audio_path: str, tokenizer):
     # Extract discrete codes from EnCodec
 
     with torch.no_grad():
-        if tokenizer_type == "Encodec":
+        if tokenizer_type.lower().replace("-", "") == "encodec":
             encoded_frames = tokenizer.encode(wav)
         else:
-            encoded_frames, scales = tokenizer.encode(wav)
+            encoded_frames, _ = tokenizer.encode(wav)
     
     return encoded_frames
 
@@ -332,6 +339,7 @@ class AudioTokenConfig:
     frame_shift: Seconds = 320.0 / 24000
     # frame_shift: Seconds = 320.0 / 48000 #NOTE(Jingjing) Modified
     num_quantizers: int = 8
+    device: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -346,6 +354,8 @@ class AudioTokenConfig32:
     frame_shift: Seconds = 640.0 / 32000
     # frame_shift: Seconds = 320.0 / 48000 #NOTE(Jingjing) Modified
     num_quantizers: int = 4
+    checkpoint: Optional[str] = None
+    device: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -361,7 +371,7 @@ class AudioTokenExtractor(FeatureExtractor):
 
     def __init__(self, config: Optional[Any] = None):
         super(AudioTokenExtractor, self).__init__(config)
-        self.tokenizer = AudioTokenizer()
+        self.tokenizer = AudioTokenizer(device=self.config.device)
 
     def extract(
         self, samples: Union[np.ndarray, torch.Tensor], sampling_rate: int
@@ -456,7 +466,7 @@ class AudioTokenExtractor32(FeatureExtractor):
     
     def __init__(self, config: Optional[Any] = None):
         super(AudioTokenExtractor32, self).__init__(config)
-        self.tokenizer = AudioTokenizer32()
+        self.tokenizer = AudioTokenizer32(device=self.config.device)
 
     def extract(
         self, samples: Union[np.ndarray, torch.Tensor], sampling_rate: int
@@ -552,7 +562,10 @@ class AudioTokenExtractor32FT(FeatureExtractor):
     
     def __init__(self, config: Optional[Any] = None):
         super(AudioTokenExtractor32FT, self).__init__(config)
-        self.tokenizer = AudioTokenizer32FT()
+        self.tokenizer = AudioTokenizer32FT(
+            device=self.config.device,
+            checkpoint=self.config.checkpoint,
+        )
 
     def extract(
         self, samples: Union[np.ndarray, torch.Tensor], sampling_rate: int

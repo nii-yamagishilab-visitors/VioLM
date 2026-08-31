@@ -1,130 +1,159 @@
-"""
-This file was developed as the lhost reciept for preparing the data.
-"""
+#!/usr/bin/env python3
+"""Create Lhotse recording/supervision manifests for VioLM."""
 
-import logging
+from __future__ import annotations
+
 import argparse
+import logging
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Optional, Union
-
-from tqdm.auto import tqdm
+from typing import Optional
 
 from lhotse import validate_recordings_and_supervisions
 from lhotse.audio import Recording, RecordingSet
 from lhotse.qa import fix_manifests
 from lhotse.supervision import SupervisionSegment, SupervisionSet
-from lhotse.utils import Pathlike
+from tqdm.auto import tqdm
 
-def prepare_cuts(
-    corpus_dir: Pathlike, output_dir: Optional[Pathlike] = None, tokenizer: str = "expression" \
-) -> Dict[str, Dict[str, Union[RecordingSet, SupervisionSet]]]:
-    """
-    Returns the manifests which consist of the Recordings and Supervisions
-    :param corpus_dir: Pathlike, the path of the data dir.
-    :param output_dir: Pathlike, the path where to write the manifests.
-    :return: a Dict whose key is the dataset part, and the value is Dicts with the keys 'recordings' and 'supervisions'.
-    """
-    corpus_dir = Path(corpus_dir)
-    assert corpus_dir.is_dir(), f"No such directory: {corpus_dir}"
-    
-    if output_dir is not None:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Tokenized MIDI (.npy) is expected to be stored next to segmented MIDI (.midi).
-    # `transfer/data_prepare.py` writes segments to `midi_seg/`, and
-    # `transfer/midi_tokenize.py` saves token arrays next to those `.midi` files.
-    transcript_dir = corpus_dir / "midi_seg"
-    assert transcript_dir.is_dir(), f"No such directory: {transcript_dir}"
-    if tokenizer == "expression":
-        transcript_files = transcript_dir.rglob("**/*.npy")
-        transcript_files = [file for file in transcript_files if 'remi' not in str(file)]
-    else:
-        transcript_files = transcript_dir.rglob("**/*_remi.npy")
-        
-    transcript_dict = {}
-    for file in transcript_files:
-        if tokenizer == "expression":
-            transcript_dict[file.stem] = str(file)
-        else:
-            transcript_dict[file.stem.split("_remi")[0]] = str(file)
-    
-    manifests = defaultdict(dict)
-    dataset_parts = ["test", "validation", "train"]
-    for part in tqdm(
-        dataset_parts,
-        desc="Process audio and text",
-    ):
-        logging.info(f"Processing subset: {part}")
-        # Generate a mapping: utt_id -> (audio_path, audio_info, speaker, text)
+from valle.utils.cli import ConsistentArgumentParser
+
+
+DEFAULT_SPLITS = ("train", "validation", "test")
+logger = logging.getLogger("violm.cut_creation")
+
+
+def _metadata_from_id(item_id: str) -> tuple[str, str]:
+    parts = item_id.split("_")
+    speaker = parts[0] if parts else "unknown"
+    language_or_style = parts[1] if len(parts) >= 2 else "0"
+    return speaker, language_or_style
+
+
+def prepare_manifests(
+    audio_dir: Path,
+    midi_token_dir: Path,
+    output_dir: Path,
+    splits: tuple[str, ...] = DEFAULT_SPLITS,
+    allow_missing: bool = False,
+) -> dict[str, dict[str, RecordingSet | SupervisionSet]]:
+    audio_dir = audio_dir.resolve()
+    midi_token_dir = midi_token_dir.resolve()
+    output_dir = output_dir.resolve()
+    if not audio_dir.is_dir():
+        raise FileNotFoundError(f"Audio segment directory does not exist: {audio_dir}")
+    if not midi_token_dir.is_dir():
+        raise FileNotFoundError(f"MIDI token directory does not exist: {midi_token_dir}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    manifests: dict[str, dict[str, RecordingSet | SupervisionSet]] = defaultdict(dict)
+    missing_tokens: list[Path] = []
+    for split in tqdm(splits, desc="Create manifests"):
         recordings = []
         supervisions = []
-        wav_path = corpus_dir / "wav_seg" / f"{part}"
-        for audio_path in tqdm(list(wav_path.rglob("**/*.wav"))):
-            idx = audio_path.stem
-            speaker = audio_path.stem.split("_")[0]
-            language = audio_path.stem.split("_")[1]
-            if idx not in transcript_dict:
-                logging.warning(f"No transcript: {idx}")
-                logging.warning(f"{audio_path} has no transcript.")
-                continue
-            text = transcript_dict[idx]
-            if not audio_path.is_file():
-                logging.warning(f"No such file: {audio_path}")
+        split_audio_dir = audio_dir / split
+        audio_paths = sorted(split_audio_dir.rglob("*.wav")) if split_audio_dir.is_dir() else []
+        for audio_path in audio_paths:
+            relative = audio_path.relative_to(split_audio_dir).with_suffix(".npy")
+            token_path = midi_token_dir / split / relative
+            if not token_path.is_file():
+                missing_tokens.append(token_path)
                 continue
             recording = Recording.from_file(audio_path)
             if recording.duration <= 0:
-                print(audio_path)
+                logger.warning("Skipping zero-duration audio: %s", audio_path)
                 continue
+            item_id = audio_path.stem
+            speaker, language = _metadata_from_id(item_id)
             recordings.append(recording)
-            segment = SupervisionSegment(
-                id=idx,
-                recording_id=idx,
-                start=0.0,
-                duration=recording.duration,
-                channel=0,
-                speaker=speaker,
-                language=language,
-                text=text.strip(),
+            supervisions.append(
+                SupervisionSegment(
+                    id=item_id,
+                    recording_id=recording.id,
+                    start=0.0,
+                    duration=recording.duration,
+                    channel=0,
+                    speaker=speaker,
+                    language=language,
+                    text=str(token_path.resolve()),
+                )
             )
-            supervisions.append(segment)
 
         recording_set = RecordingSet.from_recordings(recordings)
         supervision_set = SupervisionSet.from_segments(supervisions)
-        recording_set, supervision_set = fix_manifests(recording_set, supervision_set)
+        recording_set, supervision_set = fix_manifests(
+            recording_set, supervision_set
+        )
         validate_recordings_and_supervisions(recording_set, supervision_set)
+        recording_set.to_file(output_dir / f"recordings_{split}.jsonl.gz")
+        supervision_set.to_file(output_dir / f"supervisions_{split}.jsonl.gz")
+        manifests[split] = {
+            "recordings": recording_set,
+            "supervisions": supervision_set,
+        }
+        logger.info("%s: %d aligned items", split, len(recording_set))
 
-        if output_dir is not None:
-            supervision_set.to_file(
-                output_dir / f"supervisions_{part}.jsonl.gz"
-            )
-            recording_set.to_file(output_dir / f"recordings_{part}.jsonl.gz")
-
-        manifests[part] = {"recordings": recording_set, "supervisions": supervision_set}
-
+    if missing_tokens and not allow_missing:
+        examples = ", ".join(str(path) for path in missing_tokens[:3])
+        raise FileNotFoundError(
+            f"Missing {len(missing_tokens)} MIDI token files; examples: {examples}"
+        )
+    if missing_tokens:
+        logger.warning("Skipped %d audio files without MIDI tokens", len(missing_tokens))
     return manifests
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Prepare the ATEPP dataset manifests."
+
+def _first_existing(candidates: list[Path]) -> Optional[Path]:
+    return next((path for path in candidates if path.is_dir()), None)
+
+
+def _resolve_legacy_layout(args, parser) -> tuple[Path, Path]:
+    audio_dir = args.audio_dir
+    midi_token_dir = args.midi_token_dir
+    if args.corpus_dir is not None:
+        corpus_dir = args.corpus_dir
+        audio_dir = audio_dir or _first_existing(
+            [corpus_dir / "audio_segments", corpus_dir / "wav_seg"]
+        )
+        midi_token_dir = midi_token_dir or _first_existing(
+            [corpus_dir / "midi_tokens", corpus_dir / "midi_seg"]
+        )
+    if audio_dir is None:
+        parser.error("--audio-dir is required (or pass --corpus-dir for legacy auto-detection)")
+    if midi_token_dir is None:
+        parser.error("--midi-token-dir is required (or pass --corpus-dir for legacy auto-detection)")
+    return audio_dir, midi_token_dir
+
+
+def get_parser() -> ConsistentArgumentParser:
+    parser = ConsistentArgumentParser(
+        description="Create Lhotse manifests from VioLM segments",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(
-        "--corpus-dir",
-        type=Path,
-        required=True,
-        help="Path to the ATEPP corpus directory.",
+    parser.add_argument("--audio-dir", type=Path, help="Root of audio_segments.")
+    parser.add_argument("--midi-token-dir", type=Path, help="Root of midi_tokens.")
+    parser.add_argument("--output-dir", type=Path, required=True, help="Manifest output directory.")
+    parser.add_argument("--splits", nargs="+", default=list(DEFAULT_SPLITS))
+    parser.add_argument("--allow-missing", action="store_true")
+    parser.add_argument("--corpus-dir", type=Path, help=argparse.SUPPRESS)
+    return parser
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s",
     )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help="Path to the output directory for manifests.",
-    )
-    
+    parser = get_parser()
     args = parser.parse_args()
-    
-    prepare_cuts(
-       corpus_dir=args.corpus_dir,
-       output_dir=args.output_dir
+    audio_dir, midi_token_dir = _resolve_legacy_layout(args, parser)
+    prepare_manifests(
+        audio_dir=audio_dir,
+        midi_token_dir=midi_token_dir,
+        output_dir=args.output_dir,
+        splits=tuple(args.splits),
+        allow_missing=args.allow_missing,
     )
+
+
+if __name__ == "__main__":
+    main()

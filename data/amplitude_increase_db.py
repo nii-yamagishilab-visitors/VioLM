@@ -1,8 +1,16 @@
+#!/usr/bin/env python3
+"""Apply a fixed decibel gain to WAV files."""
+
 import os
-import numpy as np
+
 import librosa
+import numpy as np
 import soundfile as sf
-import sys
+from pathlib import Path
+
+from valle.utils.cli import ConsistentArgumentParser
+
+
 def db_to_amplitude(db):
     """Convert decibels to amplitude gain factor."""
     return librosa.db_to_amplitude(db, ref=1.0)
@@ -66,9 +74,9 @@ def amplify_by_db(input_dir, output_dir, db_increase):
     print("Processing complete!")
 
 if __name__ == "__main__":
-    # Configuration
-    INPUT_DIR = sys.argv[1] # Directory with your current files
-    OUTPUT_DIR = sys.argv[2] # Directory for amplified files
-    DB_INCREASE = float(sys.argv[3]) # Amount in dB to increase (e.g., from -5.27 to -3.0)
-    
-    amplify_by_db(INPUT_DIR, OUTPUT_DIR, DB_INCREASE)
+    parser = ConsistentArgumentParser(description="Apply a fixed dB gain to WAV files.")
+    parser.add_argument("--input-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--db-increase", type=float, required=True)
+    args = parser.parse_args()
+    amplify_by_db(args.input_dir, args.output_dir, args.db_increase)

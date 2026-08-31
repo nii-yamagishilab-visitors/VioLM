@@ -1,7 +1,7 @@
 import argparse
 
 import torch.nn as nn
-from icefall.utils import AttributeDict, str2bool
+from valle.utils.runtime import AttributeDict, str2bool
 
 from .macros import (
     NUM_AUDIO_TOKENS,

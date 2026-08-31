@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
-from icefall.utils import str2bool
 from lhotse import CutSet, load_manifest_lazy
 from lhotse.dataset import (
     CutConcatenate,
@@ -40,6 +39,7 @@ from valle.data.collation import get_text_token_collater, get_midi_token_collate
 from valle.data.dataset import SpeechSynthesisDataset, MidiSynthesisDataset
 from valle.data.fbank import get_fbank_extractor
 from valle.data.input_strategies import PromptedPrecomputedFeatures
+from valle.utils.runtime import str2bool
 
 PrecomputedFeatures = PrecomputedFeatures
 
@@ -95,7 +95,7 @@ class TtsDataModule:
         )
         group.add_argument(
             "--max-duration",
-            type=int,
+            type=float,
             default=40.0,
             help="Maximum pooled recordings duration (seconds) in a "
             "single batch. You can reduce it if it causes CUDA OOM.",
@@ -339,7 +339,7 @@ class TtsDataModule:
                 shuffle_buffer_size=self.args.shuffle_buffer_size,
                 quadratic_duration=10,
                 num_cuts_for_bins_estimate=10000,
-                drop_last=True,
+                drop_last=self.args.drop_last,
             )
         else:
             logging.info(
@@ -398,18 +398,17 @@ class TtsDataModule:
                 cut_transforms=[],
             )
             
-        valid_sampler = DynamicBucketingSampler(
+        valid_sampler = SimpleCutSampler(
             cuts_valid,
             max_duration=self.args.max_duration,
             shuffle=False,
-            drop_last=True,
         )
         logging.info("About to create dev dataloader")
         valid_dl = DataLoader(
             validate,
             sampler=valid_sampler,
             batch_size=None,
-            num_workers=4,
+            num_workers=self.args.num_workers,
             persistent_workers=False,
         )
 
@@ -437,11 +436,10 @@ class TtsDataModule:
                 cut_transforms=[],
             )
         
-        sampler = DynamicBucketingSampler(
+        sampler = SimpleCutSampler(
             cuts_test,
             max_duration=self.args.max_duration,
             shuffle=False,
-            drop_last=True,
         )
         logging.debug("About to create test dataloader")
         test_dl = DataLoader(

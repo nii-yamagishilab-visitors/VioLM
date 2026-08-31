@@ -8,6 +8,8 @@ import mido
 from mido import MidiFile, MidiTrack, Message
 from tqdm import tqdm
 
+from valle.utils.cli import ConsistentArgumentParser
+
 def has_long_polyphony(midi_file_path, min_notes=2, min_duration=0.1):
     """
     Check if a MIDI file has 3 or more notes played together for longer than 1 second.
@@ -71,7 +73,9 @@ def has_long_polyphony(midi_file_path, min_notes=2, min_duration=0.1):
         return False
 
 
-def filter_polyphonic_files(directory_path, min_notes=2, min_duration=0.1):
+def filter_polyphonic_files(
+    directory_path, min_notes=2, min_duration=0.1, delete=False
+):
     """
     Filter out MIDI files with sustained polyphony.
     
@@ -102,23 +106,28 @@ def filter_polyphonic_files(directory_path, min_notes=2, min_duration=0.1):
     print(f"  Kept: {len(filtered_files)}")
     print(f"  Removed: {len(removed_files)}")
     
-    for file in removed_files:
-        try:
-            print("  Removing file:", file)
-            os.remove(Path(directory_path) / file)
-            print("  Removing file:", file[:-4] + '.wav')
-            os.remove(Path(directory_path) / (file[:-4] + '.wav'))  # Also remove corresponding WAV file if exists
-        except Exception as e:
-            print(f"  Error removing {file}: {e}")
+    if delete:
+        for file in removed_files:
+            midi_path = Path(directory_path) / file
+            wav_path = midi_path.with_suffix(".wav")
+            for path in (midi_path, wav_path):
+                if path.exists():
+                    path.unlink()
+                    print("  Removed:", path)
+    elif removed_files:
+        print("  Dry run: pass --delete to remove the listed source files.")
     
     return filtered_files
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Filter out MIDI files with sustained polyphony.")
+    parser = ConsistentArgumentParser(description="Filter out MIDI files with sustained polyphony.")
     parser.add_argument("--directory", type=str, help="Directory containing MIDI files")
-    parser.add_argument("--min_notes", type=int, default=2, help="Minimum number of simultaneous notes (default: 3)")
-    parser.add_argument("--min_duration", type=float, default=0.1, help="Minimum duration in seconds (default: 1.0)")
+    parser.add_argument("--min-notes", type=int, default=2, help="Minimum number of simultaneous notes (default: 2)")
+    parser.add_argument("--min-duration", type=float, default=0.1, help="Minimum duration in seconds (default: 0.1)")
+    parser.add_argument("--delete", action="store_true", help="Delete rejected MIDI and paired WAV files; default is dry-run.")
     
     args = parser.parse_args()
     
-    filter_polyphonic_files(args.directory, args.min_notes, args.min_duration)
+    filter_polyphonic_files(
+        args.directory, args.min_notes, args.min_duration, delete=args.delete
+    )

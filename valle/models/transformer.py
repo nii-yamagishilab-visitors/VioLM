@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from icefall.utils import make_pad_mask
 from torchmetrics.classification import BinaryAccuracy
 
 from valle.models.valle import Transpose
@@ -31,6 +30,7 @@ from valle.modules.transformer import (
     TransformerEncoder,
     TransformerEncoderLayer,
 )
+from valle.utils.runtime import make_pad_mask
 
 from .macros import NUM_MEL_BINS, NUM_TEXT_TOKENS
 # from .visualizer import visualize

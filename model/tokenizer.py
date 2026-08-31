@@ -1,36 +1,16 @@
 #!/usr/bin/env python3
-# Copyright    2023                            (authors: Feiteng Li)
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""
-Phonemize Text and EnCodec Audio.
+"""Extract audio codec features and assemble final VioLM CutSet manifests."""
 
-Usage example:
-    python3 bin/tokenizer.py \
-        --src_dir ./data/manifests --output_dir ./data/tokenized
+from __future__ import annotations
 
-"""
 import argparse
 import logging
 import os
 from pathlib import Path
-import numpy as np
 
+import numpy as np
 import torch
-import torchaudio
 import torch.multiprocessing
-from encodec.utils import convert_audio
-from icefall.utils import get_executor
 from lhotse import CutSet, NumpyHdf5Writer
 from lhotse.recipes.utils import read_manifests_if_cached
 from tqdm.auto import tqdm
@@ -41,195 +21,171 @@ from valle.data import (
     AudioTokenExtractor,
     AudioTokenExtractor32,
     AudioTokenExtractor32FT,
-    # TextTokenizer,
-    # tokenize_text,
 )
 from valle.data.fbank import get_fbank_extractor
-from valle.utils import SymbolTable
+from valle.utils.cli import ConsistentArgumentParser
+from valle.utils.runtime import get_executor
+from valle.utils.runtime import select_device
+
 
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
-
-
-# Torch's multithreaded behavior needs to be disabled or
-# it wastes a lot of CPU and slow things down.
-# Do this outside of main() in case it needs to take effect
-# even when we are not invoking the main (e.g. when spawning subprocesses).
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
 torch.multiprocessing.set_sharing_strategy("file_system")
+logger = logging.getLogger("violm.audio_tokenize")
 
 
-def get_args():
-    parser = argparse.ArgumentParser()
+def normalize_extractor(value: str) -> str:
+    normalized = value.strip().lower().replace("_", "-")
+    aliases = {
+        "encodec": "encodec",
+        "encodec32": "encodec32",
+        "encodec-32": "encodec32",
+        "encodec32ft": "encodec32-ft",
+        "encodec32-ft": "encodec32-ft",
+        "fbank": "fbank",
+    }
+    if normalized not in aliases:
+        raise argparse.ArgumentTypeError(
+            f"Unknown audio extractor {value!r}; choose encodec, encodec32, encodec32-ft, or fbank"
+        )
+    return aliases[normalized]
 
-    parser.add_argument(
-        "--src-dir",
-        type=Path,
-        default=Path("data/manifests"),
-        help="Path to the manifest files",
+
+def get_parser() -> ConsistentArgumentParser:
+    parser = ConsistentArgumentParser(
+        description="Extract audio tokens and create cuts_*.jsonl.gz",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    parser.add_argument("--manifest-dir", "--src-dir", dest="manifest_dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--audio-extractor", type=normalize_extractor, default="encodec32-ft")
     parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("data/tokenized"),
-        help="Path to the tokenized files",
+        "--codec-checkpoint", type=Path,
+        help="Required by encodec32-ft; the hybrid EnCodec .bin file.",
     )
-    
+    parser.add_argument("--dataset-parts", nargs="+", default=["train", "validation", "test"])
+    parser.add_argument("--prefix", default="", help="Optional manifest/file prefix without a trailing underscore.")
+    parser.add_argument("--suffix", default="jsonl.gz")
+    parser.add_argument("--batch-duration", type=float, default=100.0)
+    parser.add_argument("--num-jobs", type=int, default=min(4, os.cpu_count() or 1))
+    parser.add_argument("--overwrite", action="store_true")
     parser.add_argument(
-        "--audio-extractor",
-        type=str,
-        default="Encodec",
-        help="Encodec or Fbank",
+        "--device",
+        default="auto",
+        help="Audio codec device; auto selects the CUDA GPU with most free memory.",
     )
-    parser.add_argument(
-        "--dataset-parts",
-        type=str,
-        default="test train validation",
-        help="Space separated dataset parts",
-    )
-    parser.add_argument(
-        "--prefix",
-        type=str,
-        default="atepp",
-        help="prefix of the manifest file",
-    )
-    parser.add_argument(
-        "--suffix",
-        type=str,
-        default="jsonl.gz",
-        help="suffix of the manifest file",
-    )
-    parser.add_argument(
-        "--batch-duration",
-        type=float,
-        default=100.0,
-        help="The maximum number of audio seconds in a batch."
-        "Determines batch size dynamically.",
-    )
-
-    return parser.parse_args()
+    return parser
 
 
-def main():
-    args = get_args()
+def _normalize_parts(values: list[str]) -> list[str]:
+    # Compatibility with the old shell script, which accidentally passed the
+    # literal string "--dataset-parts all" as the option value.
+    joined = " ".join(values).replace("--dataset-parts", "").replace("-p", "").strip()
+    if joined == "all":
+        return ["train", "validation", "test"]
+    parts = joined.split()
+    if not parts:
+        raise ValueError("At least one dataset part is required")
+    return parts
 
-    dataset_parts = args.dataset_parts.replace("--dataset-parts", "").strip()
-    if dataset_parts == "all":  # LibriTTS
-        dataset_parts = [
-            "test",
-            "train",
-            "validation"
-        ]
-    else:
-        dataset_parts = dataset_parts.replace("-p", "").strip().split(" ")
 
-    assert len(dataset_parts) >= 1
+def _create_extractor(name: str, codec_checkpoint: Path | None, device: str):
+    if name == "encodec":
+        return AudioTokenExtractor(AudioTokenConfig(device=device))
+    if name == "encodec32":
+        return AudioTokenExtractor32(AudioTokenConfig32(device=device))
+    if name == "encodec32-ft":
+        if codec_checkpoint is None:
+            raise ValueError("--codec-checkpoint is required with --audio-extractor encodec32-ft")
+        checkpoint = codec_checkpoint.expanduser().resolve()
+        return AudioTokenExtractor32FT(
+            AudioTokenConfig32(checkpoint=str(checkpoint), device=device)
+        )
+    return get_fbank_extractor()
 
+
+def _file_prefix(prefix: str) -> str:
+    cleaned = prefix.strip().strip("_")
+    return f"{cleaned}_" if cleaned else ""
+
+
+def tokenize_audio_manifests(args: argparse.Namespace) -> None:
+    dataset_parts = _normalize_parts(args.dataset_parts)
+    manifest_dir = args.manifest_dir.resolve()
+    output_dir = args.output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
     manifests = read_manifests_if_cached(
         dataset_parts=dataset_parts,
-        output_dir=args.src_dir,
+        output_dir=manifest_dir,
         prefix=args.prefix,
         suffix=args.suffix,
         types=["recordings", "supervisions", "cuts"],
     )
+    if not manifests:
+        raise FileNotFoundError(
+            f"No manifests found in {manifest_dir} for parts {dataset_parts}"
+        )
+    device = str(select_device(args.device))
+    logger.info("Audio extractor device: %s", device)
+    extractor = _create_extractor(
+        args.audio_extractor, args.codec_checkpoint, device
+    )
+    prefix = _file_prefix(args.prefix)
+    storage_name = "fbank" if args.audio_extractor == "fbank" else args.audio_extractor.replace("-", "")
 
-    audio_extractor = None
-    if args.audio_extractor:
-        if args.audio_extractor == "Encodec":
-            audio_extractor = AudioTokenExtractor(AudioTokenConfig())
-        elif args.audio_extractor == "Encodec32":
-            audio_extractor = AudioTokenExtractor32(AudioTokenConfig32())
-        elif args.audio_extractor == "Encodec32FT":
-            audio_extractor = AudioTokenExtractor32FT(AudioTokenConfig32())
-        else:
-            assert args.audio_extractor == "Fbank"
-            audio_extractor = get_fbank_extractor()
-
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    num_jobs = min(4, os.cpu_count())
-    logging.info(f"dataset_parts: {dataset_parts} manifests {len(manifests)}")
-
-    prefix = args.prefix
-    if prefix and not prefix.endswith("_"):
-        prefix = f"{prefix}_"
-    with get_executor() as ex:
-        for partition, m in manifests.items():
-            logging.info(
-                f"Processing partition: {partition} CUDA: {torch.cuda.is_available()}"
-            )
-            try:
+    with get_executor() as executor:
+        for partition, manifest in manifests.items():
+            logger.info("Processing %s (CUDA=%s)", partition, torch.cuda.is_available())
+            if "recordings" in manifest and "supervisions" in manifest:
                 cut_set = CutSet.from_manifests(
-                    recordings=m["recordings"],
-                    supervisions=m["supervisions"],
+                    recordings=manifest["recordings"],
+                    supervisions=manifest["supervisions"],
                 )
-            except Exception:
-                cut_set = m["cuts"]
-            
-            # AudioTokenizer
-            if args.audio_extractor:
-                if args.audio_extractor == "Encodec":
-                    storage_path = (
-                        f"{args.output_dir}/{args.prefix}_encodec_{partition}"
-                    )
-                elif args.audio_extractor == "Encodec32":
-                    storage_path = (
-                        f"{args.output_dir}/{args.prefix}_encodec_{partition}"
-                    )
-                elif args.audio_extractor == "Encodec32FT":
-                    storage_path = (
-                        f"{args.output_dir}/{args.prefix}_encodec_{partition}"
+            elif "cuts" in manifest:
+                cut_set = manifest["cuts"]
+            else:
+                raise ValueError(f"Incomplete manifest for {partition}: {manifest.keys()}")
+
+            storage_path = output_dir / f"{prefix}{storage_name}_{partition}"
+            with torch.no_grad():
+                if torch.cuda.is_available() and args.audio_extractor.startswith("encodec"):
+                    cut_set = cut_set.compute_and_store_features_batch(
+                        extractor=extractor,
+                        storage_path=str(storage_path),
+                        num_workers=args.num_jobs,
+                        batch_duration=args.batch_duration,
+                        collate=False,
+                        overwrite=args.overwrite,
+                        storage_type=NumpyHdf5Writer,
                     )
                 else:
-                    storage_path = (
-                        f"{args.output_dir}/{args.prefix}_fbank_{partition}"
+                    cut_set = cut_set.compute_and_store_features(
+                        extractor=extractor,
+                        storage_path=str(storage_path),
+                        num_jobs=args.num_jobs,
+                        executor=executor,
+                        storage_type=NumpyHdf5Writer,
+                        overwrite=args.overwrite,
                     )
 
-                # if args.prefix.lower() in ["atepp"]:
-                #     cut_set = cut_set.resample(48000)
-                    # https://github.com/lifeiteng/vall-e/issues/90
-                    # if args.prefix == "aishell":
-                    #     # NOTE: the loudness of aishell audio files is around -33
-                    #     # The best way is datamodule --on-the-fly-feats --enable-audio-aug
-                    #     cut_set = cut_set.normalize_loudness(
-                    #         target=-20.0, affix_id=True
-                    #     )
+            for cut in tqdm(cut_set, desc=f"Attach MIDI tokens ({partition})"):
+                token_path = Path(cut.supervisions[0].text)
+                tokens = np.load(token_path, allow_pickle=False).tolist()
+                cut.supervisions[0].custom = {"tokens": {"midi": tokens}}
+            cuts_path = output_dir / f"{prefix}cuts_{partition}.{args.suffix}"
+            cut_set.to_file(cuts_path)
+            logger.info("Wrote %s", cuts_path)
 
-                with torch.no_grad():
-                    if (
-                        torch.cuda.is_available()
-                        and args.audio_extractor in ["Encodec", "Encodec32", "Encodec32FT"]
-                    ):
-                        cut_set = cut_set.compute_and_store_features_batch(
-                            extractor=audio_extractor,
-                            storage_path=storage_path,
-                            num_workers=num_jobs,
-                            batch_duration=args.batch_duration,
-                            collate=False,
-                            overwrite=True,
-                            storage_type=NumpyHdf5Writer,
-                        )
-                    else:
-                        cut_set = cut_set.compute_and_store_features(
-                            extractor=audio_extractor,
-                            storage_path=storage_path,
-                            num_jobs=num_jobs if ex is None else 64,
-                            executor=ex,
-                            storage_type=NumpyHdf5Writer,
-                        )
 
-            # MidiTokens
-            for c in tqdm(cut_set):
-                tokens = np.load(c.supervisions[0].text).tolist()
-                c.supervisions[0].custom = {}
-                c.supervisions[0].custom["tokens"] = {"midi": tokens}
-
-            cuts_filename = f"{prefix}cuts_{partition}.{args.suffix}"
-            cut_set.to_file(f"{args.output_dir}/{cuts_filename}")
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s",
+    )
+    args = get_parser().parse_args()
+    tokenize_audio_manifests(args)
 
 
 if __name__ == "__main__":
-    formatter = (
-        "%(asctime)s %(levelname)s [%(filename)s:%(lineno)d] %(message)s"
-    )
-    logging.basicConfig(format=formatter, level=logging.INFO)
     main()
