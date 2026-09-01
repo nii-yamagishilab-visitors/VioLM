@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Derived from MIDI-VALLE and modified for VioLM by the VioLM authors, 2026.
+
 """Prepare aligned MIDI/audio segments for VioLM.
 
 Canonical output layout::

@@ -12,6 +12,8 @@ setup(
     long_description=(PROJECT_ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
     python_requires=">=3.10,<3.11",
+    license="BSD-3-Clause AND Apache-2.0",
+    license_files=["LICENSE", "LICENSES/Apache-2.0.txt"],
     packages=find_packages(exclude=("tests", "tests.*")),
     include_package_data=True,
     install_requires=[

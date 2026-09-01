@@ -1,4 +1,5 @@
 # Copyright      2023                          (authors: Feiteng Li)
+# Modified for VioLM by the VioLM authors, 2026.
 #
 # See ../../../../LICENSE for clarification regarding multiple authors
 #

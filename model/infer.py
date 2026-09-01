@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Derived from MIDI-VALLE and modified for VioLM by the VioLM authors, 2026.
+
 """Synthesize violin audio from tokenized prompt and target MIDI."""
 
 from __future__ import annotations

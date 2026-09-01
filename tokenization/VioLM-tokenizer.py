@@ -1,3 +1,5 @@
+# Derived from MIDI-VALLE and modified for VioLM by the VioLM authors, 2026.
+
 from __future__ import annotations
 
 from symusic import Note, Score, Tempo, TimeSignature, Track

@@ -1,4 +1,5 @@
 # Copyright    2023                             (authors: Feiteng Li)
+# Modified for VioLM by the VioLM authors, 2026.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

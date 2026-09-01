@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Copyright    2021  Xiaomi Corp.             (authors: Fangjun Kuang)
 # Copyright    2023                           (authors: Feiteng Li)
+# Modified for VioLM by the VioLM authors, 2026.
 #
 # See ../../../../LICENSE for clarification regarding multiple authors
 #

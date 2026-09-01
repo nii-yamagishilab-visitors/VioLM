@@ -1,3 +1,5 @@
+# Derived from MIDI-VALLE and modified for VioLM by the VioLM authors, 2026.
+
 import argparse
 
 import torch.nn as nn

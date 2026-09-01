@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Derived from MIDI-VALLE and modified for VioLM by the VioLM authors, 2026.
+
 """Extract audio codec features and assemble final VioLM CutSet manifests."""
 
 from __future__ import annotations

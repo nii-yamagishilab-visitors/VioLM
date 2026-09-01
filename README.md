@@ -227,7 +227,31 @@ python data/synthesis_vst.py \
 }
 ```
 
+## License
+
+Original VioLM source code is released under the
+[BSD 3-Clause License](LICENSE). Files derived from MIDI-VALLE remain under
+[Apache License 2.0](LICENSES/Apache-2.0.txt); their provenance is documented
+in [`valle/README.md`](valle/README.md) and the acknowledgments below. Both
+licenses permit commercial source-code use subject to their respective
+terms.
+
+These source-code licenses do not apply to model weights or checkpoints,
+datasets, or audio assets. Capriccio-MIDI is released separately under
+[CC BY-NC 4.0](https://zenodo.org/records/21670078); other separately
+distributed artifacts are governed by the license supplied with each
+artifact. No model-weight license is granted by this source-code repository.
+
 ## Acknowledgments
 
-VioLM builds on [MIDI-VALLE](https://github.com/nii-yamagishilab/MIDI-VALLE),
-AudioCraft/EnCodec, MidiTok, Symusic, and Lhotse.
+VioLM builds on
+[MIDI-VALLE](https://github.com/nii-yamagishilab/MIDI-VALLE), which adapts
+Feiteng Li's
+[unofficial VALL-E implementation](https://github.com/lifeiteng/vall-e).
+The project also uses
+[AudioCraft/EnCodec](https://github.com/facebookresearch/audiocraft),
+[MidiTok](https://github.com/Natooz/MidiTok),
+[Symusic](https://github.com/Yikai-Liao/symusic), and
+[Lhotse](https://github.com/lhotse-speech/lhotse). Parts of the original
+training utilities originate from
+[icefall](https://github.com/k2-fsa/icefall).
